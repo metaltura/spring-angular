@@ -1,0 +1,3868 @@
+name: SpringAngularToCode
+instanceOf: Core:Model
+elements:
+  - name: spring
+    instanceOf: Core:Package
+    elements:
+      - name: SpringPattern
+        instanceOf: Core:Class
+        abstract: true
+        icon: mui:Code
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: keyTypeOf
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: entity
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:jpa.Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Core:String
+            code: |
+              /**
+               * The Java type of the key of a JPA entity: `Long` for an IDENTITY
+               * key, otherwise the type of the column of its `id` (rule 11).
+               */
+              export default function (entity: any) {
+                if (entity.idGeneration === 'IDENTITY') return 'Long'
+                const column = entity.id?.column
+                return column ? this.javaTypeOf(column) : 'String'
+              }
+          - name: controllersOf
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: service
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:service.Service
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: Spring:web.Controller
+            code: |
+              /**
+               * The controllers of the context that call a service, in the order
+               * of the context.
+               */
+              export default function (service: any) {
+                const beans: any[] = service.context?.beans ?? []
+                return beans.filter((bean: any) =>
+                  bean.instanceOf?.name === 'Controller' && bean.service === service)
+              }
+          - name: repositoryOf
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: controller
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:web.Controller
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: false
+              type: Spring:jpa.Repository
+            code: |
+              /**
+               * The repository a controller works with (rule 23): among the
+               * repositories of its service, the one whose JPA entity is bound to
+               * the table named as the resource of the controller. None: undefined.
+               */
+              export default function (controller: any) {
+                const resource = controller.resource?.name
+                const repositories: any[] = controller.service?.repositories ?? []
+                return repositories.find((repository: any) =>
+                  repository.entity?.table?.name === resource)
+              }
+          - name: servedOf
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: controller
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:web.Controller
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: Application:http.Endpoint
+            code: |
+              /**
+               * The endpoints of a controller its service implements (rules 10, 21
+               * and 23): the first endpoint of each known operation, when the
+               * service has the repository of the resource and the endpoint has
+               * the payloads its operation needs — a response to list, read,
+               * create or update, a request to create or update. The controller
+               * answers 501 to the others.
+               */
+              export default function (controller: any) {
+                if (!this.repositoryOf(controller)) return []
+                const seen = new Set<string>()
+                const endpoints: any[] = controller.endpoints ?? []
+                return endpoints.filter((endpoint: any) => {
+                  const operation = this.operationOf(endpoint)
+                  if (operation === 'unknown' || seen.has(operation)) return false
+                  const writes = operation === 'create' || operation === 'update'
+                  if (operation !== 'delete' && !endpoint.response) return false
+                  if (writes && !endpoint.request) return false
+                  seen.add(operation)
+                  return true
+                })
+              }
+          - name: serviceMethodOf
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: controller
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:web.Controller
+              - name: operation
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Core:String
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Core:String
+            code: |
+              /**
+               * The name of the service method a controller calls for an operation
+               * (rule 21): `list`, `get`, `create`, `update` or `delete`, followed
+               * by the resource when the service serves several resources
+               * (`listCommande`).
+               */
+              export default function (controller: any, operation) {
+                const controllers: any[] = this.controllersOf(controller.service)
+                const resources = new Set(controllers.map((c: any) => c.resource))
+                if (resources.size <= 1) return operation
+                return `${operation}${this.pascalOf(controller.resource.name)}`
+              }
+      - name: ContextToProject
+        instanceOf: Core:Class
+        icon: thesvg:spring-boot
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:boot.Context
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: FileSystem:Entry
+            code: |
+              import {
+                Folder,
+                JavaFile,
+                MarkdownFile,
+                TextFile
+              } from 'FileSystem'
+              import {
+                contextToSchema,
+                controllerToDtos,
+                controllerToJavaFile,
+                entityToJavaFile,
+                repositoryToJavaFile,
+                serviceToJavaFile
+              } from 'SpringAngularToCode/spring'
+
+              /**
+               * ContextToProject — the stack pattern for Spring Boot (rules 16 and
+               * 17). Branched on a Spring context, it writes the Maven project in a
+               * system folder:
+               * - `pom.xml`, `README.md`, and under `src/main/resources/`:
+               *   `application.properties` and `schema.sql` (ContextToSchema), the
+               *   schema Spring plays at start and Hibernate validates (rule 14);
+               * - under `src/main/java/<base package>/`: the application class, in
+               *   `config/` the handler of the errors of the API (rule 15) and the
+               *   JSON written as the Node server writes it (rule 22), a
+               *   JPA entity per entity of the context (EntityToJavaFile), an
+               *   interface per repository (RepositoryToJavaFile), a class per
+               *   service (ServiceToJavaFile) and per controller
+               *   (ControllerToJavaFile), and a transfer record per payload its
+               *   controllers serve (ControllerToDtos).
+               */
+              export default function (source) {
+                const context: any = source
+                if (!context.application) {
+                  throw new Error(`${context.name}: the context has no application`)
+                }
+                const appClass = `${this.pascalOf(context.name)}Application`
+                const entityFiles = (context.entities ?? [])
+                  .map((entity: any) => map(entity, entityToJavaFile))
+                const repositories = beansOf(context, 'Repository')
+                const services = beansOf(context, 'Service')
+                const controllers = beansOf(context, 'Controller')
+                const dtoFiles = firstOfEachName(
+                  controllers.flatMap((controller: any) => mapAll(controller, controllerToDtos))
+                )
+                const folderOf = (name: string, entries: any[]) =>
+                  new Folder({ name, entries })
+                const javaRoot = nest(String(context.basePackage).split('.'), [
+                  new JavaFile({
+                    name: this.fileNameOf(appClass, 'java'),
+                    text: this.textOf(applicationClassOf(context, appClass))
+                  }),
+                  folderOf('config', [
+                    new JavaFile({
+                      name: this.fileNameOf('ApiExceptionHandler', 'java'),
+                      text: this.textOf(exceptionHandlerOf(context))
+                    }),
+                    new JavaFile({
+                      name: this.fileNameOf('JsonConfig', 'java'),
+                      text: this.textOf(jsonConfigOf(context))
+                    })
+                  ]),
+                  folderOf('entity', entityFiles),
+                  folderOf('repository', repositories
+                    .map((bean: any) => map(bean, repositoryToJavaFile))),
+                  folderOf('service', services
+                    .map((bean: any) => map(bean, serviceToJavaFile))),
+                  folderOf('web', controllers
+                    .map((bean: any) => map(bean, controllerToJavaFile))),
+                  folderOf('dto', dtoFiles)
+                ])
+                return [
+                  new TextFile({
+                    name: this.fileNameOf('pom', 'xml'),
+                    fileType: 'xml',
+                    text: this.textOf(pomOf(this, context))
+                  }),
+                  new MarkdownFile({
+                    name: this.fileNameOf('README', 'md'),
+                    text: this.textOf(readmeOf(this, context))
+                  }),
+                  new Folder({
+                    name: 'src',
+                    entries: [
+                      new Folder({
+                        name: 'main',
+                        entries: [
+                          new Folder({
+                            name: 'resources',
+                            entries: [
+                              new TextFile({
+                                name: this.fileNameOf('application', 'properties'),
+                                fileType: 'properties',
+                                text: this.textOf(propertiesOf(this, context))
+                              }),
+                              map(context, contextToSchema)
+                            ]
+                          }),
+                          new Folder({ name: 'java', entries: [javaRoot] })
+                        ]
+                      })
+                    ]
+                  })
+                ]
+              }
+
+              /**
+               * Nested folders for a package path, the entries in the innermost.
+               */
+              function nest(names: string[], entries: any[]): any {
+                const [name, ...rest] = names
+                return new Folder({
+                  name,
+                  entries: rest.length ? [nest(rest, entries)] : entries
+                })
+              }
+
+              /**
+               * The beans of a context of one kind (`Repository`, `Service`,
+               * `Controller`), in the order of the context.
+               */
+              function beansOf(context: any, kind: string): any[] {
+                const beans: any[] = context.beans ?? []
+                return beans.filter((bean: any) => bean.instanceOf?.name === kind)
+              }
+
+              /**
+               * Two controllers on the same resource give the same records: once.
+               */
+              function firstOfEachName(specs: any[]): any[] {
+                const seen = new Set<string>()
+                return specs.filter((spec: any) => {
+                  if (seen.has(spec.name)) return false
+                  seen.add(spec.name)
+                  return true
+                })
+              }
+
+              /**
+               * The SQL database of the application, the first one (rule 16).
+               */
+              function databaseOf(pattern: any, context: any): any {
+                const stores: any[] = context.application.stores ?? []
+                const sql = stores.filter((s: any) => s.instanceOf?._path?.() === 'Application:sql.Database')
+                if (sql.length === 0) {
+                  log.warning(`${context.name}: no SQL database in ${context.application.name}`)
+                  return undefined
+                }
+                if (sql.length > 1) {
+                  log.warning(`${context.name}: ${sql.length} SQL databases, using ${sql[0].name}`)
+                }
+                return sql[0]
+              }
+
+              /** The lines of `pom.xml`. */
+              function pomOf(pattern: any, context: any): string[] {
+                const artifact = pattern.kebabOf(context.name)
+                const dependency = (artifactId: string, scope?: string) => [
+                  '    <dependency>',
+                  `      <groupId>${artifactId.startsWith('spring-boot') ? 'org.springframework.boot' : 'org.mariadb.jdbc'}</groupId>`,
+                  `      <artifactId>${artifactId}</artifactId>`,
+                  ...(scope ? [`      <scope>${scope}</scope>`] : []),
+                  '    </dependency>'
+                ]
+                return [
+                  '<?xml version="1.0" encoding="UTF-8"?>',
+                  '<project xmlns="http://maven.apache.org/POM/4.0.0"',
+                  '         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"',
+                  '         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">',
+                  '  <modelVersion>4.0.0</modelVersion>',
+                  '  <parent>',
+                  '    <groupId>org.springframework.boot</groupId>',
+                  '    <artifactId>spring-boot-starter-parent</artifactId>',
+                  '    <version>3.3.5</version>',
+                  '    <relativePath/>',
+                  '  </parent>',
+                  `  <groupId>${context.basePackage}</groupId>`,
+                  `  <artifactId>${artifact}</artifactId>`,
+                  '  <version>0.1.0</version>',
+                  `  <name>${artifact}</name>`,
+                  '  <properties>',
+                  '    <java.version>17</java.version>',
+                  '  </properties>',
+                  '  <dependencies>',
+                  ...dependency('spring-boot-starter-web'),
+                  ...dependency('spring-boot-starter-data-jpa'),
+                  ...dependency('spring-boot-starter-validation'),
+                  ...dependency('mariadb-java-client', 'runtime'),
+                  '  </dependencies>',
+                  '  <build>',
+                  '    <plugins>',
+                  '      <plugin>',
+                  '        <groupId>org.springframework.boot</groupId>',
+                  '        <artifactId>spring-boot-maven-plugin</artifactId>',
+                  '      </plugin>',
+                  '    </plugins>',
+                  '  </build>',
+                  '</project>'
+                ]
+              }
+
+              /**
+               * The lines of `application.properties`: the server, the database,
+               * `schema.sql` played at start and checked by Hibernate (rule 14),
+               * the names of the tables and columns used as the entities write
+               * them, as `schema.sql` does (Spring Boot would turn `clientId` into
+               * `client_id`).
+               */
+              function propertiesOf(pattern: any, context: any): string[] {
+                const database = databaseOf(pattern, context)
+                const name = database ? database.name : pattern.kebabOf(context.name)
+                return [
+                  `spring.application.name=${pattern.kebabOf(context.name)}`,
+                  'server.port=8080',
+                  `spring.datasource.url=jdbc:mariadb://localhost:3306/${name}`,
+                  'spring.datasource.username=' + '${DB_USER:root}',
+                  'spring.datasource.password=' + '${DB_PASSWORD:}',
+                  'spring.sql.init.mode=always',
+                  'spring.jpa.hibernate.ddl-auto=validate',
+                  'spring.jpa.hibernate.naming.physical-strategy=' +
+                    'org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl',
+                  'spring.jpa.open-in-view=false'
+                ]
+              }
+
+              /**
+               * The lines of `config/JsonConfig.java` (rule 22): the JSON of the
+               * API written as the Node server writes it — a date in ISO 8601
+               * with its milliseconds in UTC, a missing value left out rather
+               * than `null`, a whole number without a decimal part (`2`, not
+               * `2.0`).
+               */
+              function jsonConfigOf(context: any): string[] {
+                return [
+                  `package ${context.basePackage}.config;`,
+                  '',
+                  'import com.fasterxml.jackson.annotation.JsonInclude;',
+                  'import com.fasterxml.jackson.core.JsonGenerator;',
+                  'import com.fasterxml.jackson.databind.JsonSerializer;',
+                  'import com.fasterxml.jackson.databind.SerializerProvider;',
+                  'import java.io.IOException;',
+                  'import java.time.Instant;',
+                  'import java.time.ZoneOffset;',
+                  'import java.time.format.DateTimeFormatter;',
+                  'import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;',
+                  'import org.springframework.context.annotation.Bean;',
+                  'import org.springframework.context.annotation.Configuration;',
+                  '',
+                  '@Configuration',
+                  'public class JsonConfig {',
+                  '',
+                  '    private static final DateTimeFormatter ISO_MILLIS = DateTimeFormatter',
+                  '        .ofPattern("yyyy-MM-dd\'T\'HH:mm:ss.SSS\'Z\'")',
+                  '        .withZone(ZoneOffset.UTC);',
+                  '',
+                  '    @Bean',
+                  '    public Jackson2ObjectMapperBuilderCustomizer asTheNodeServer() {',
+                  '        return builder -> builder',
+                  '            .serializationInclusion(JsonInclude.Include.NON_NULL)',
+                  '            .serializerByType(Instant.class, new InstantSerializer())',
+                  '            .serializerByType(Double.class, new DoubleSerializer());',
+                  '    }',
+                  '',
+                  '    private static class InstantSerializer extends JsonSerializer<Instant> {',
+                  '        @Override',
+                  '        public void serialize(Instant value, JsonGenerator json,',
+                  '                SerializerProvider provider) throws IOException {',
+                  '            json.writeString(ISO_MILLIS.format(value));',
+                  '        }',
+                  '    }',
+                  '',
+                  '    private static class DoubleSerializer extends JsonSerializer<Double> {',
+                  '        @Override',
+                  '        public void serialize(Double value, JsonGenerator json,',
+                  '                SerializerProvider provider) throws IOException {',
+                  '            boolean whole = value == Math.rint(value)',
+                  '                && Math.abs(value) < 9007199254740992d;',
+                  '            if (whole) {',
+                  '                json.writeNumber(value.longValue());',
+                  '            } else {',
+                  '                json.writeNumber(value);',
+                  '            }',
+                  '        }',
+                  '    }',
+                  '}'
+                ]
+              }
+
+              /**
+               * The lines of `config/ApiExceptionHandler.java` (rule 15): the
+               * errors answered as the Node server does. A payload that fails its
+               * validation gives 400 and `errors` with a reason per field
+               * (`required` for a missing value), in the order the payload
+               * declares its fields — the validator reports them in no stable
+               * order. A deletion the database refuses
+               * because a foreign key references the element gives 409 and
+               * `errors` with `id: referenced`; any other refusal of the database
+               * gives 409 and the message of its cause. A value of the wrong type
+               * gives 400 and `errors` with the kind the Node server names
+               * (`date`, `Number`).
+               */
+              function exceptionHandlerOf(context: any): string[] {
+                return [
+                  `package ${context.basePackage}.config;`,
+                  '',
+                  'import jakarta.servlet.http.HttpServletRequest;',
+                  'import com.fasterxml.jackson.databind.exc.MismatchedInputException;',
+                  'import java.lang.reflect.RecordComponent;',
+                  'import java.time.temporal.Temporal;',
+                  'import java.util.LinkedHashMap;',
+                  'import java.util.List;',
+                  'import java.util.Map;',
+                  'import java.util.stream.Stream;',
+                  'import org.springframework.core.NestedExceptionUtils;',
+                  'import org.springframework.dao.DataIntegrityViolationException;',
+                  'import org.springframework.http.HttpStatus;',
+                  'import org.springframework.http.ResponseEntity;',
+                  'import org.springframework.http.converter.HttpMessageNotReadableException;',
+                  'import org.springframework.validation.FieldError;',
+                  'import org.springframework.web.bind.MethodArgumentNotValidException;',
+                  'import org.springframework.web.bind.annotation.ExceptionHandler;',
+                  'import org.springframework.web.bind.annotation.RestControllerAdvice;',
+                  '',
+                  '@RestControllerAdvice',
+                  'public class ApiExceptionHandler {',
+                  '',
+                  '    @ExceptionHandler(MethodArgumentNotValidException.class)',
+                  '    public ResponseEntity<Map<String, Object>> invalid(',
+                  '            MethodArgumentNotValidException exception) {',
+                  '        Map<String, String> errors = new LinkedHashMap<>();',
+                  '        for (String field : fieldsOf(exception.getTarget())) {',
+                  '            FieldError error = exception.getFieldError(field);',
+                  '            if (error != null) {',
+                  '                errors.put(field, reasonOf(error));',
+                  '            }',
+                  '        }',
+                  '        for (FieldError error : exception.getFieldErrors()) {',
+                  '            errors.putIfAbsent(error.getField(), reasonOf(error));',
+                  '        }',
+                  '        return ResponseEntity.badRequest().body(Map.of("errors", errors));',
+                  '    }',
+                  '',
+                  '    @ExceptionHandler(HttpMessageNotReadableException.class)',
+                  '    public ResponseEntity<Map<String, Object>> unreadable(',
+                  '            HttpMessageNotReadableException exception) {',
+                  '        if (exception.getCause() instanceof MismatchedInputException input',
+                  '                && !input.getPath().isEmpty()) {',
+                  '            String field = input.getPath()',
+                  '                .get(input.getPath().size() - 1).getFieldName();',
+                  '            return ResponseEntity.badRequest().body(Map.of("errors",',
+                  '                Map.of(field, kindOf(input.getTargetType()))));',
+                  '        }',
+                  '        return ResponseEntity.badRequest()',
+                  '            .body(Map.of("error", messageOf(exception)));',
+                  '    }',
+                  '',
+                  '    @ExceptionHandler(DataIntegrityViolationException.class)',
+                  '    public ResponseEntity<Map<String, Object>> refused(',
+                  '            DataIntegrityViolationException exception,',
+                  '            HttpServletRequest request) {',
+                  '        Map<String, Object> body = "DELETE".equals(request.getMethod())',
+                  '            ? Map.of("errors", Map.of("id", "referenced"))',
+                  '            : Map.of("error", messageOf(exception));',
+                  '        return ResponseEntity.status(HttpStatus.CONFLICT).body(body);',
+                  '    }',
+                  '',
+                  '    private static List<String> fieldsOf(Object payload) {',
+                  '        if (payload == null || !payload.getClass().isRecord()) {',
+                  '            return List.of();',
+                  '        }',
+                  '        return Stream.of(payload.getClass().getRecordComponents())',
+                  '            .map(RecordComponent::getName)',
+                  '            .toList();',
+                  '    }',
+                  '',
+                  '    private static String reasonOf(FieldError error) {',
+                  '        String code = error.getCode();',
+                  '        return "NotNull".equals(code) || "NotEmpty".equals(code)',
+                  '            ? "required"',
+                  '            : String.valueOf(code);',
+                  '    }',
+                  '',
+                  '    private static String kindOf(Class<?> type) {',
+                  '        if (type == null) {',
+                  '            return "type";',
+                  '        }',
+                  '        if (Temporal.class.isAssignableFrom(type)) {',
+                  '            return "date";',
+                  '        }',
+                  '        if (Number.class.isAssignableFrom(type)) {',
+                  '            return "Number";',
+                  '        }',
+                  '        return type.getSimpleName();',
+                  '    }',
+                  '',
+                  '    private static String messageOf(Exception exception) {',
+                  '        Throwable cause = NestedExceptionUtils.getMostSpecificCause(exception);',
+                  '        return String.valueOf(cause.getMessage());',
+                  '    }',
+                  '}'
+                ]
+              }
+
+              /** The lines of the application class. */
+              function applicationClassOf(
+                context: any,
+                appClass: string
+              ): string[] {
+                return [
+                  `package ${context.basePackage};`,
+                  '',
+                  'import org.springframework.boot.SpringApplication;',
+                  'import org.springframework.boot.autoconfigure.SpringBootApplication;',
+                  '',
+                  '@SpringBootApplication',
+                  `public class ${appClass} {`,
+                  '',
+                  '    public static void main(String[] args) {',
+                  `        SpringApplication.run(${appClass}.class, args);`,
+                  '    }',
+                  '}'
+                ]
+              }
+
+              /** The lines of `README.md`. */
+              function readmeOf(pattern: any, context: any): string[] {
+                const database = databaseOf(pattern, context)
+                const title = context.application.title || context.application.name
+                const resources: any[] = (context.beans ?? [])
+                  .filter((bean: any) => bean.instanceOf?.name === 'Controller')
+                  .map((controller: any) => controller.resource)
+                  .filter((resource: any) => !!resource)
+                return [
+                  `# ${title} — Spring Boot`,
+                  '',
+                  `Generated from the Spring context \`${context.name}\` of the application`,
+                  `\`${context.application.name}\`. Regenerated at each change of the model: edit the`,
+                  'model, not these files.',
+                  '',
+                  '## Run',
+                  '',
+                  `1. A MariaDB server on \`localhost:3306\` with a database named`,
+                  `   \`${database ? database.name : pattern.kebabOf(context.name)}\`; \`DB_USER\` and \`DB_PASSWORD\` name its credentials`,
+                  '   (defaults: `root` and empty).',
+                  '   The `docker-compose.yml` at the root of a Spring + Angular project',
+                  '   starts one: `docker compose up -d`.',
+                  '2. `mvn spring-boot:run` — the API listens on `http://localhost:8080`.',
+                  '   A database just started may refuse the first connection: wait a',
+                  '   few seconds and run it again.',
+                  '',
+                  '## Schema',
+                  '',
+                  'Spring creates the missing tables at start from',
+                  '`src/main/resources/schema.sql`, then Hibernate checks that the',
+                  'entities match them and changes nothing. After a field is added to',
+                  'the model, the check fails until the database is created again',
+                  '(`docker compose down` then `docker compose up -d`).',
+                  '',
+                  '## Resources',
+                  '',
+                  ...resources.map((resource: any) => `- \`${pattern.routeOf(resource)}\` — ${resource.name}`)
+                ]
+              }
+      - name: EntityToJavaFile
+        instanceOf: Core:Class
+        icon: mui:TableChart
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:jpa.Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:JavaFile
+            code: |
+              import { JavaFile } from 'FileSystem'
+
+              /**
+               * EntityToJavaFile — the JPA entity class of an entity (rule 18), in
+               * `entity/` of the base package of its context: `@Entity` on its table
+               * and an attribute per attribute of the model —
+               * - a Field becomes a column of the Java type of its column, the one
+               *   the entity names as `id` generated as `idGeneration` says;
+               * - a ManyToOne becomes an association on the column of its foreign
+               *   key, typed by the target entity;
+               * - a column names its SQL type (`columnDefinition`), the one
+               *   `schema.sql` creates: Hibernate validates the database against
+               *   it (rule 14) — a `CHAR(36)` identifier is not the `varchar(255)`
+               *   it would expect for a String;
+               * - a OneToMany becomes a list mapped by the ManyToOne of the other
+               *   entity.
+               * Then an empty constructor and the accessors.
+               */
+              export default function (source) {
+                const entity: any = source
+                const className = this.pascalOf(entity.name)
+                const attributes: any[] = entity.attributes ?? []
+                const lines = [
+                  `package ${entity.context.basePackage}.entity;`,
+                  '',
+                  ...importsOf(this, entity, attributes),
+                  '@Entity',
+                  `@Table(name = "${entity.table.name}")`,
+                  `public class ${className} {`,
+                  '',
+                  ...attributes.flatMap((a: any) => [...attributeOf(this, entity, a), '']),
+                  `    public ${className}() {`,
+                  '    }',
+                  ...attributes.flatMap((a: any) => ['', ...accessorsOf(this, entity, a)]),
+                  '}'
+                ]
+                return new JavaFile({
+                  name: this.fileNameOf(className, 'java'),
+                  text: this.textOf(lines)
+                })
+              }
+
+              /**
+               * `Field`, `ManyToOne` or `OneToMany`: the class of an attribute.
+               */
+              function kindOf(attribute: any): string {
+                return attribute.instanceOf?.name ?? ''
+              }
+
+              /** The Java type of an attribute. */
+              function typeOf(
+                pattern: any,
+                entity: any,
+                attribute: any
+              ): string {
+                const kind = kindOf(attribute)
+                if (kind === 'ManyToOne') return pattern.pascalOf(attribute.target.name)
+                if (kind === 'OneToMany') {
+                  return `List<${pattern.pascalOf(attribute.mappedBy.entity.name)}>`
+                }
+                const column = attribute.column
+                if (entity.id === attribute && entity.idGeneration === 'IDENTITY') {
+                  return 'Long'
+                }
+                return pattern.javaTypeOf(column)
+              }
+
+              /**
+               * `cascade = CascadeType.ALL` or `cascade = {…}` from the model.
+               */
+              function cascadeOf(attribute: any): string[] {
+                const values: string[] = attribute.cascade ?? []
+                if (values.length === 0) return []
+                const items = values.map((v: string) => `CascadeType.${v}`)
+                return [items.length === 1 ? `cascade = ${items[0]}` : `cascade = {${items.join(', ')}}`]
+              }
+
+              /** The annotations and the declaration of an attribute. */
+              function attributeOf(
+                pattern: any,
+                entity: any,
+                attribute: any
+              ): string[] {
+                const kind = kindOf(attribute)
+                const name = pattern.camelOf(attribute.name)
+                const type = typeOf(pattern, entity, attribute)
+                if (kind === 'ManyToOne') {
+                  const options = [
+                    ...(attribute.fetch ? [`fetch = FetchType.${attribute.fetch}`] : []),
+                    ...cascadeOf(attribute)
+                  ]
+                  const column = attribute.foreignKey?.column
+                  const nullable = column && column.mandatory ? ', nullable = false' : ''
+                  const definition = definitionOf(column)
+                  return [
+                    `    @ManyToOne${options.length ? `(${options.join(', ')})` : ''}`,
+                    `    @JoinColumn(name = "${column?.name ?? name}"${nullable}${definition})`,
+                    `    private ${type} ${name};`
+                  ]
+                }
+                if (kind === 'OneToMany') {
+                  const options = [
+                    `mappedBy = "${pattern.camelOf(attribute.mappedBy.name)}"`,
+                    ...(attribute.fetch ? [`fetch = FetchType.${attribute.fetch}`] : []),
+                    ...cascadeOf(attribute),
+                    ...(attribute.orphanRemoval ? ['orphanRemoval = true'] : [])
+                  ]
+                  return [
+                    `    @OneToMany(${options.join(', ')})`,
+                    `    private ${type} ${name} = new ArrayList<>();`
+                  ]
+                }
+                const column = attribute.column
+                const nullable = column?.mandatory ? ', nullable = false' : ''
+                const definition = definitionOf(column)
+                return [
+                  ...(entity.id === attribute
+                    ? ['    @Id', `    @GeneratedValue(strategy = GenerationType.${entity.idGeneration ?? 'UUID'})`]
+                    : []),
+                  ...(column?.multiple ? ['    @JdbcTypeCode(SqlTypes.JSON)'] : []),
+                  `    @Column(name = "${column?.name ?? attribute.name}"${nullable}${definition})`,
+                  `    private ${type} ${name};`
+                ]
+              }
+
+              /**
+               * The SQL type of a column as an option of its annotation, none when
+               * the model gives no type. A `JSON` column is declared `LONGTEXT`:
+               * MariaDB stores JSON as an alias of LONGTEXT and reports it so to
+               * the validation of Hibernate.
+               */
+              function definitionOf(column: any): string {
+                if (!column?.sqlType) return ''
+                const type = /^json$/i.test(column.sqlType) ? 'LONGTEXT'
+                  : column.sqlType
+                return `, columnDefinition = "${type}"`
+              }
+
+              /** The getter and the setter of an attribute. */
+              function accessorsOf(
+                pattern: any,
+                entity: any,
+                attribute: any
+              ): string[] {
+                const name = pattern.camelOf(attribute.name)
+                const type = typeOf(pattern, entity, attribute)
+                const suffix = pattern.pascalOf(attribute.name)
+                return [
+                  `    public ${type} get${suffix}() {`,
+                  `        return ${name};`,
+                  '    }',
+                  '',
+                  `    public void set${suffix}(${type} ${name}) {`,
+                  `        this.${name} = ${name};`,
+                  '    }'
+                ]
+              }
+
+              /**
+               * The imports the attributes need, `jakarta.persistence.*` first.
+               */
+              function importsOf(
+                pattern: any,
+                entity: any,
+                attributes: any[]
+              ): string[] {
+                const types = attributes.map((a: any) => typeOf(pattern, entity, a))
+                const lists = types.some((t: string) => t.startsWith('List<'))
+                const json = attributes.some((a: any) => kindOf(a) === 'Field' && a.column?.multiple)
+                const imports = [
+                  'jakarta.persistence.*',
+                  ...(types.some((t: string) => t.includes('Instant')) ? ['java.time.Instant'] : []),
+                  ...(lists ? ['java.util.ArrayList', 'java.util.List'] : []),
+                  ...(json ? ['org.hibernate.annotations.JdbcTypeCode', 'org.hibernate.type.SqlTypes'] : [])
+                ]
+                return [...imports.map((i: string) => `import ${i};`), '']
+              }
+      - name: ControllerToDtos
+        instanceOf: Core:Class
+        icon: mui:DataObject
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:web.Controller
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: FileSystem:JavaFile
+            code: |
+              import { JavaFile } from 'FileSystem'
+
+              /**
+               * ControllerToDtos — a transfer record per payload the controller
+               * serves (rule 19), in `dto/` of the base package of its context:
+               * `<Payload>Dto`, a component per field of the payload, `@NotNull` on a
+               * mandatory one. The request and the response of each endpoint the
+               * controller lists, once each.
+               */
+              export default function (source) {
+                const controller: any = source
+                const basePackage = controller.context.basePackage
+                return this.payloadsOf(controller)
+                  .map((payload: any) => recordOf(this, basePackage, payload))
+              }
+
+              /**
+               * The check of a mandatory field: `NotEmpty` for a String, as the
+               * `required` of the Node server refuses an empty text, `NotNull`
+               * otherwise; none for an optional field.
+               */
+              function checkOf(field: any, type: string): string {
+                if (!field.mandatory) return ''
+                return type === 'String' ? 'NotEmpty' : 'NotNull'
+              }
+
+              /** The record of a payload. */
+              function recordOf(
+                pattern: any,
+                basePackage: string,
+                payload: any
+              ) {
+                const name = `${pattern.pascalOf(payload.name)}Dto`
+                const fields: any[] = payload.fields ?? []
+                const types = fields.map((field: any) => pattern.javaTypeOf(field))
+                const checks = fields.map((field: any, i: number) =>
+                  checkOf(field, types[i]))
+                const imports = [
+                  ...(checks.includes('NotEmpty') ? ['jakarta.validation.constraints.NotEmpty'] : []),
+                  ...(checks.includes('NotNull') ? ['jakarta.validation.constraints.NotNull'] : []),
+                  ...(types.some((t: string) => t.includes('Instant')) ? ['java.time.Instant'] : []),
+                  ...(types.some((t: string) => t.startsWith('List<')) ? ['java.util.List'] : [])
+                ]
+                const components = fields.map((field: any, i: number) => {
+                  const check = checks[i] ? `@${checks[i]} ` : ''
+                  const comma = i < fields.length - 1 ? ',' : ''
+                  return `    ${check}${types[i]} ${pattern.camelOf(field.name)}${comma}`
+                })
+                const lines = [
+                  `package ${basePackage}.dto;`,
+                  '',
+                  ...(imports.length ? [...imports.map((i: string) => `import ${i};`), ''] : []),
+                  `public record ${name}(`,
+                  ...components,
+                  ') {',
+                  '}'
+                ]
+                return new JavaFile({
+                  name: pattern.fileNameOf(name, 'java'),
+                  text: pattern.textOf(lines)
+                })
+              }
+      - name: entityToJavaFile
+        instanceOf: SpringAngularToCode:spring.EntityToJavaFile
+        source: Spring:jpa.Entity
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: controllerToDtos
+        instanceOf: SpringAngularToCode:spring.ControllerToDtos
+        source: Spring:web.Controller
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: springToCode
+        instanceOf: SpringAngularToCode:spring.ContextToProject
+        source: Spring:boot.Context
+        target: FileSystem:SystemFolder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: RepositoryToJavaFile
+        instanceOf: Core:Class
+        icon: mui:Storage
+        extends:
+          - SpringAngularToCode:spring.SpringPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:jpa.Repository
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:JavaFile
+            code: |
+              import { JavaFile } from 'FileSystem'
+
+              /**
+               * RepositoryToJavaFile — the Spring Data interface of a repository
+               * (rule 20), in `repository/` of the base package of its context:
+               * `JpaRepository` of its entity, typed by the type of its key.
+               */
+              export default function (source) {
+                const repository: any = source
+                const entity = repository.entity
+                if (!entity) {
+                  throw new Error(`${repository.name}: the repository has no entity`)
+                }
+                const className = this.pascalOf(repository.name)
+                const entityClass = this.pascalOf(entity.name)
+                const basePackage = repository.context.basePackage
+                const lines = [
+                  `package ${basePackage}.repository;`,
+                  '',
+                  `import ${basePackage}.entity.${entityClass};`,
+                  'import org.springframework.data.jpa.repository.JpaRepository;',
+                  '',
+                  `public interface ${className}`,
+                  `        extends JpaRepository<${entityClass}, ${this.keyTypeOf(entity)}> {`,
+                  '}'
+                ]
+                return new JavaFile({
+                  name: this.fileNameOf(className, 'java'),
+                  text: this.textOf(lines)
+                })
+              }
+      - name: ServiceToJavaFile
+        instanceOf: Core:Class
+        icon: mui:SettingsSuggest
+        extends:
+          - SpringAngularToCode:spring.SpringPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:service.Service
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:JavaFile
+            code: |
+              import { JavaFile } from 'FileSystem'
+
+              /**
+               * ServiceToJavaFile — the service class of a service bean (rules 21,
+               * 23 and 12), in `service/` of the base package of its context:
+               * `@Service`, `@Transactional` when the model says so, a final
+               * attribute per repository, and a method per operation its
+               * controllers serve, written with the repository of the entity of
+               * the resource. The conversions between the entity and the transfer
+               * records close the class.
+               */
+              export default function (source) {
+                const service: any = source
+                const className = this.pascalOf(service.name)
+                const basePackage = service.context.basePackage
+                const repositories: any[] = service.repositories ?? []
+                const uses = new Set<string>()
+                const methods: string[][] = []
+                const conversions = new Map<string, string[]>()
+                for (const controller of this.controllersOf(service)) {
+                  const part = partOf(this, controller)
+                  if (part.served.length) uses.add(part.entityImport)
+                  for (const endpoint of part.served) {
+                    methods.push(methodOf(this, part, endpoint, uses))
+                  }
+                  addConversions(this, part, conversions, uses)
+                }
+                for (const r of repositories) {
+                  uses.add(`${basePackage}.repository.${this.pascalOf(r.name)}`)
+                }
+                const manager = uses.has('jakarta.persistence.EntityManager')
+                const fields = [
+                  ...repositories.map((r: any) =>
+                    [this.pascalOf(r.name), this.camelOf(r.name)]),
+                  ...(manager ? [['EntityManager', 'entityManager']] : [])
+                ]
+                const lines = [
+                  `package ${basePackage}.service;`,
+                  '',
+                  ...importsOf(service, uses),
+                  '@Service',
+                  ...(service.transactional ? ['@Transactional'] : []),
+                  `public class ${className} {`,
+                  ...(fields.length ? [''] : []),
+                  ...fields.map(([type, name]) => `    private final ${type} ${name};`),
+                  ...constructorOf(className, fields),
+                  ...methods.flatMap((method: string[]) => ['', ...method]),
+                  ...[...conversions.values()].flatMap((c: string[]) => ['', ...c]),
+                  '}'
+                ]
+                return new JavaFile({
+                  name: this.fileNameOf(className, 'java'),
+                  text: this.textOf(lines)
+                })
+              }
+
+              /**
+               * What the service does for one controller: the endpoints it
+               * implements, the entity of the resource and its repository.
+               */
+              function partOf(pattern: any, controller: any): any {
+                const repository = pattern.repositoryOf(controller)
+                const entity = repository?.entity
+                const basePackage = controller.context.basePackage
+                return {
+                  controller,
+                  served: pattern.servedOf(controller),
+                  entity,
+                  entityClass: entity ? pattern.pascalOf(entity.name) : '',
+                  keyType: entity ? pattern.keyTypeOf(entity) : 'String',
+                  repository: repository ? pattern.camelOf(repository.name) : '',
+                  entityImport: entity
+                    ? `${basePackage}.entity.${pattern.pascalOf(entity.name)}`
+                    : ''
+                }
+              }
+
+              /** The name of the record of a payload. */
+              function dtoOf(pattern: any, payload: any): string {
+                return `${pattern.pascalOf(payload.name)}Dto`
+              }
+
+              /** The method of an operation (rule 21). */
+              function methodOf(
+                pattern: any,
+                part: any,
+                endpoint: any,
+                uses: Set<string>
+              ): string[] {
+                const operation = pattern.operationOf(endpoint)
+                const name = pattern.serviceMethodOf(part.controller, operation)
+                const basePackage = part.controller.context.basePackage
+                const out = endpoint.response ? dtoOf(pattern, endpoint.response) : ''
+                const input = endpoint.request ? dtoOf(pattern, endpoint.request) : ''
+                for (const dto of [out, input].filter((d: string) => d)) {
+                  uses.add(`${basePackage}.dto.${dto}`)
+                }
+                const repo = part.repository
+                const key = part.keyType
+                if (operation === 'list') {
+                  uses.add('java.util.List')
+                  return [
+                    `    public List<${out}> ${name}() {`,
+                    `        return ${repo}.findAll().stream().map(this::to${out}).toList();`,
+                    '    }'
+                  ]
+                }
+                if (operation === 'get') {
+                  uses.add('java.util.Optional')
+                  return [
+                    `    public Optional<${out}> ${name}(${key} id) {`,
+                    `        return ${repo}.findById(id).map(this::to${out});`,
+                    '    }'
+                  ]
+                }
+                if (operation === 'create') {
+                  return [
+                    `    public ${out} ${name}(${input} input) {`,
+                    `        ${part.entityClass} entity = new ${part.entityClass}();`,
+                    `        apply${input}(entity, input);`,
+                    `        return to${out}(${repo}.save(entity));`,
+                    '    }'
+                  ]
+                }
+                if (operation === 'update') {
+                  uses.add('java.util.Optional')
+                  return [
+                    `    public Optional<${out}> ${name}(${key} id, ${input} input) {`,
+                    `        return ${repo}.findById(id).map(entity -> {`,
+                    `            apply${input}(entity, input);`,
+                    `            return to${out}(${repo}.save(entity));`,
+                    '        });',
+                    '    }'
+                  ]
+                }
+                return [
+                  `    public boolean ${name}(${key} id) {`,
+                  `        if (!${repo}.existsById(id)) {`,
+                  '            return false;',
+                  '        }',
+                  `        ${repo}.deleteById(id);`,
+                  '        return true;',
+                  '    }'
+                ]
+              }
+
+              /**
+               * Adds the conversions the methods of a controller call, once each:
+               * `to<Record>` from the entity for each response, `apply<Record>`
+               * onto the entity for each request.
+               */
+              function addConversions(
+                pattern: any,
+                part: any,
+                conversions: Map<string, string[]>,
+                uses: Set<string>
+              ): void {
+                for (const endpoint of part.served) {
+                  const response = endpoint.response
+                  const request = endpoint.request
+                  if (response && !conversions.has(`to${dtoOf(pattern, response)}`)) {
+                    conversions.set(
+                      `to${dtoOf(pattern, response)}`,
+                      toDtoOf(pattern, part, response)
+                    )
+                  }
+                  if (request && !conversions.has(`apply${dtoOf(pattern, request)}`)) {
+                    conversions.set(
+                      `apply${dtoOf(pattern, request)}`,
+                      applyOf(pattern, part, request, uses)
+                    )
+                  }
+                }
+              }
+
+              /**
+               * The attribute of the entity a payload field matches (rule 12): the
+               * Field or the ManyToOne of the same name, or the ManyToOne whose
+               * foreign key is on the column named as the field (`clientId` gives
+               * `client`). None: undefined.
+               */
+              function attributeOf(entity: any, field: any): any {
+                const attributes: any[] = entity.attributes ?? []
+                const kind = (a: any) => a.instanceOf?.name
+                const same = attributes.find((a: any) => a.name === field.name)
+                if (same && kind(same) !== 'OneToMany') return same
+                return attributes.find((a: any) =>
+                  kind(a) === 'ManyToOne' &&
+                  a.foreignKey?.column?.name === field.name)
+              }
+
+              /**
+               * A field without a matching attribute is left out with a TODO in
+               * the code and a warning in the log (rule 12).
+               */
+              function unmatched(part: any, payload: any, field: any): string {
+                log.warning(
+                  `${part.controller.service.name}: ${payload.name}.${field.name} ` +
+                  `matches no attribute of ${part.entity.name}`
+                )
+                return `TODO: ${field.name} matches no attribute of ${part.entity.name}`
+              }
+
+              /** `to<Record>`: the record of an entity. */
+              function toDtoOf(
+                pattern: any,
+                part: any,
+                payload: any
+              ): string[] {
+                const dto = dtoOf(pattern, payload)
+                const fields: any[] = payload.fields ?? []
+                const values = fields.map((field: any, i: number) => {
+                  const comma = i < fields.length - 1 ? ',' : ''
+                  const attribute = attributeOf(part.entity, field)
+                  if (!attribute) {
+                    return `            null${comma} // ${unmatched(part, payload, field)}`
+                  }
+                  const getter = `entity.get${pattern.pascalOf(attribute.name)}()`
+                  if (attribute.instanceOf?.name !== 'ManyToOne') {
+                    return `            ${getter}${comma}`
+                  }
+                  const keyName = attribute.target?.id?.name ?? 'id'
+                  const key = `get${pattern.pascalOf(keyName)}()`
+                  return `            ${getter} == null ? null : ${getter}.${key}${comma}`
+                })
+                return [
+                  `    private ${dto} to${dto}(${part.entityClass} entity) {`,
+                  `        return new ${dto}(`,
+                  ...values,
+                  '        );',
+                  '    }'
+                ]
+              }
+
+              /**
+               * `apply<Record>`: the fields of a record set on the entity; a
+               * ManyToOne receives a reference to the entity of the key it carries;
+               * a multiple field left out is an empty list, as the Node server
+               * stores it.
+               */
+              function applyOf(
+                pattern: any,
+                part: any,
+                payload: any,
+                uses: Set<string>
+              ): string[] {
+                const dto = dtoOf(pattern, payload)
+                const basePackage = part.controller.context.basePackage
+                const fields: any[] = payload.fields ?? []
+                const statements = fields.flatMap((field: any) => {
+                  const attribute = attributeOf(part.entity, field)
+                  if (!attribute) return [`        // ${unmatched(part, payload, field)}`]
+                  if (attribute === part.entity.id) return []
+                  const setter = `entity.set${pattern.pascalOf(attribute.name)}`
+                  const value = `input.${pattern.camelOf(field.name)}()`
+                  if (attribute.instanceOf?.name !== 'ManyToOne') {
+                    if (!field.multiple) return [`        ${setter}(${value});`]
+                    uses.add('java.util.ArrayList')
+                    return [
+                      `        ${setter}(${value} == null ? new ArrayList<>()`,
+                      `            : ${value});`
+                    ]
+                  }
+                  const target = pattern.pascalOf(attribute.target.name)
+                  uses.add(`${basePackage}.entity.${target}`)
+                  uses.add('jakarta.persistence.EntityManager')
+                  return [
+                    `        ${setter}(${value} == null ? null`,
+                    `            : entityManager.getReference(${target}.class, ${value}));`
+                  ]
+                })
+                return [
+                  `    private void apply${dto}(${part.entityClass} entity, ${dto} input) {`,
+                  ...statements,
+                  '    }'
+                ]
+              }
+
+              /** The constructor that receives the final attributes. */
+              function constructorOf(
+                className: string,
+                fields: string[][]
+              ): string[] {
+                if (fields.length === 0) return []
+                const params = fields.map(([type, name], i: number) =>
+                  `            ${type} ${name}${i < fields.length - 1 ? ',' : ''}`)
+                return [
+                  '',
+                  `    public ${className}(`,
+                  ...params,
+                  '    ) {',
+                  ...fields.map(([, name]) => `        this.${name} = ${name};`),
+                  '    }'
+                ]
+              }
+
+              /** The imports, sorted, then a blank line. */
+              function importsOf(service: any, uses: Set<string>): string[] {
+                const all = [
+                  ...uses,
+                  'org.springframework.stereotype.Service',
+                  ...(service.transactional
+                    ? ['org.springframework.transaction.annotation.Transactional']
+                    : [])
+                ].filter((i: string) => i)
+                const sorted = [...new Set(all)].sort()
+                return [...sorted.map((i: string) => `import ${i};`), '']
+              }
+      - name: ControllerToJavaFile
+        instanceOf: Core:Class
+        icon: mui:Http
+        extends:
+          - SpringAngularToCode:spring.SpringPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:web.Controller
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:JavaFile
+            code: |
+              import { JavaFile } from 'FileSystem'
+
+              /**
+               * ControllerToJavaFile — the REST controller of a controller bean
+               * (rules 22 and 10), in `web/` of the base package of its context:
+               * `@RestController` on the route of its resource, and a method per
+               * endpoint it serves, which calls its service. An endpoint the
+               * service does not implement — an operation the pattern does not
+               * know, a missing payload, no repository for the resource — answers
+               * 501 and the log says why.
+               */
+              export default function (source) {
+                const controller: any = source
+                const resource = controller.resource
+                if (!resource) {
+                  throw new Error(`${controller.name}: the controller has no resource`)
+                }
+                if ((resource.payloads ?? []).length === 0) {
+                  throw new Error(`${controller.name}: ${resource.name} has no payload`)
+                }
+                const className = this.pascalOf(controller.name)
+                const basePackage = controller.context.basePackage
+                const served: any[] = this.servedOf(controller)
+                const service = controller.service
+                warnUnserved(this, controller, served)
+                const uses = new Set<string>()
+                const handlers = (controller.endpoints ?? []).map((endpoint: any) =>
+                  handlerOf(this, controller, served, endpoint, uses))
+                if (service) {
+                  uses.add(`${basePackage}.service.${this.pascalOf(service.name)}`)
+                }
+                const fields = service
+                  ? [[this.pascalOf(service.name), this.camelOf(service.name)]]
+                  : []
+                const lines = [
+                  `package ${basePackage}.web;`,
+                  '',
+                  ...importsOf(uses),
+                  '@RestController',
+                  `@RequestMapping("${this.routeOf(resource)}")`,
+                  `public class ${className} {`,
+                  ...fields.flatMap(([type, name]) => [
+                    '',
+                    `    private final ${type} ${name};`,
+                    '',
+                    `    public ${className}(${type} ${name}) {`,
+                    `        this.${name} = ${name};`,
+                    '    }'
+                  ]),
+                  ...handlers.flatMap((handler: string[]) => ['', ...handler]),
+                  '}'
+                ]
+                return new JavaFile({
+                  name: this.fileNameOf(className, 'java'),
+                  text: this.textOf(lines)
+                })
+              }
+
+              /**
+               * The log says once why the service implements none of the
+               * endpoints: no service, or no repository for the resource.
+               */
+              function warnUnserved(
+                pattern: any,
+                controller: any,
+                served: any[]
+              ): void {
+                if ((controller.endpoints ?? []).length === 0 || served.length) return
+                if (!controller.service) {
+                  log.warning(`${controller.name}: no service, every endpoint answers 501`)
+                } else if (!pattern.repositoryOf(controller)) {
+                  log.warning(
+                    `${controller.name}: ${controller.service.name} has no repository ` +
+                    `for ${controller.resource.name}, every endpoint answers 501`
+                  )
+                }
+              }
+
+              /** The mapping of an endpoint: its relative path as is. */
+              function mappingOf(endpoint: any): string {
+                const method = String(endpoint.method ?? 'GET').toLowerCase()
+                const verb = method.charAt(0).toUpperCase() + method.slice(1)
+                const path = String(endpoint.path ?? '')
+                return `    @${verb}Mapping${path ? `("${path}")` : ''}`
+              }
+
+              /** `@PathVariable("id") String id` for a path `/{id}`. */
+              function idParamOf(endpoint: any, keyType: string): string {
+                const match = /\{([^}]+)\}/.exec(String(endpoint.path ?? ''))
+                const variable = match ? match[1] : 'id'
+                return `@PathVariable("${variable}") ${keyType} id`
+              }
+
+              /** The method of an endpoint. */
+              function handlerOf(
+                pattern: any,
+                controller: any,
+                served: any[],
+                endpoint: any,
+                uses: Set<string>
+              ): string[] {
+                const operation = pattern.operationOf(endpoint)
+                const implemented = served
+                  .find((e: any) => pattern.operationOf(e) === operation)
+                const name = pattern.camelOf(endpoint.name)
+                if (!implemented) {
+                  return notImplementedOf(pattern, controller, endpoint, name, uses)
+                }
+                const basePackage = controller.context.basePackage
+                const dto = (payload: any) => `${pattern.pascalOf(payload.name)}Dto`
+                const out = implemented.response ? dto(implemented.response) : ''
+                const input = implemented.request ? dto(implemented.request) : ''
+                for (const d of [out, input].filter((d: string) => d)) {
+                  uses.add(`${basePackage}.dto.${d}`)
+                }
+                const service = pattern.camelOf(controller.service.name)
+                const call = `${service}.${pattern.serviceMethodOf(controller, operation)}`
+                const entity = pattern.repositoryOf(controller).entity
+                const id = idParamOf(endpoint, pattern.keyTypeOf(entity))
+                const body = `@RequestBody @Valid ${input} input`
+                const mapping = mappingOf(endpoint)
+                if (operation === 'list') {
+                  uses.add('java.util.List')
+                  return [
+                    mapping,
+                    `    public List<${out}> ${name}() {`,
+                    `        return ${call}();`,
+                    '    }'
+                  ]
+                }
+                uses.add('org.springframework.http.ResponseEntity')
+                if (operation === 'get') {
+                  return [
+                    mapping,
+                    `    public ResponseEntity<${out}> ${name}(${id}) {`,
+                    `        return ResponseEntity.of(${call}(id));`,
+                    '    }'
+                  ]
+                }
+                if (operation === 'create') {
+                  uses.add('jakarta.validation.Valid')
+                  uses.add('org.springframework.http.HttpStatus')
+                  return [
+                    mapping,
+                    `    public ResponseEntity<${out}> ${name}(${body}) {`,
+                    '        return ResponseEntity.status(HttpStatus.CREATED)',
+                    `            .body(${call}(input));`,
+                    '    }'
+                  ]
+                }
+                if (operation === 'update') {
+                  uses.add('jakarta.validation.Valid')
+                  return [
+                    mapping,
+                    `    public ResponseEntity<${out}> ${name}(`,
+                    `            ${id},`,
+                    `            ${body}) {`,
+                    `        return ResponseEntity.of(${call}(id, input));`,
+                    '    }'
+                  ]
+                }
+                return [
+                  mapping,
+                  `    public ResponseEntity<Void> ${name}(${id}) {`,
+                  `        return ${call}(id)`,
+                  '            ? ResponseEntity.noContent().build()',
+                  '            : ResponseEntity.notFound().build();',
+                  '    }'
+                ]
+              }
+
+              /**
+               * The method of an endpoint the service does not implement: it
+               * answers 501 (rule 10). An unknown operation or a missing payload
+               * is said in the log.
+               */
+              function notImplementedOf(
+                pattern: any,
+                controller: any,
+                endpoint: any,
+                name: string,
+                uses: Set<string>
+              ): string[] {
+                const operation = pattern.operationOf(endpoint)
+                const route = `${endpoint.method} ${endpoint.path ?? ''}`.trim()
+                const why = operation === 'unknown'
+                  ? 'is no operation the pattern knows'
+                  : 'has no implementation in the service'
+                if (operation === 'unknown') {
+                  log.warning(`${controller.name}: ${route} ${why}, it answers 501`)
+                } else if (pattern.repositoryOf(controller)) {
+                  log.warning(
+                    `${controller.name}: ${endpoint.name} lacks the payload ` +
+                    `its operation needs, it answers 501`
+                  )
+                }
+                uses.add('org.springframework.http.HttpStatus')
+                uses.add('org.springframework.http.ResponseEntity')
+                return [
+                  mappingOf(endpoint),
+                  `    public ResponseEntity<Void> ${name}() {`,
+                  `        // TODO: ${route} ${why}`,
+                  '        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build();',
+                  '    }'
+                ]
+              }
+
+              /** The imports, sorted, then a blank line. */
+              function importsOf(uses: Set<string>): string[] {
+                const all = [...uses, 'org.springframework.web.bind.annotation.*']
+                const sorted = [...new Set(all)].sort()
+                return [...sorted.map((i: string) => `import ${i};`), '']
+              }
+      - name: repositoryToJavaFile
+        instanceOf: SpringAngularToCode:spring.RepositoryToJavaFile
+        source: Spring:jpa.Repository
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: serviceToJavaFile
+        instanceOf: SpringAngularToCode:spring.ServiceToJavaFile
+        source: Spring:service.Service
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: controllerToJavaFile
+        instanceOf: SpringAngularToCode:spring.ControllerToJavaFile
+        source: Spring:web.Controller
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: ContextToSchema
+        instanceOf: Core:Class
+        icon: mui:Storage
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:boot.Context
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:SqlFile
+            code: |
+              import { SqlFile } from 'FileSystem'
+
+              /**
+               * ContextToSchema — the schema of the SQL database of a Spring
+               * application (rule 14), `src/main/resources/schema.sql`. Spring
+               * plays it at start (`spring.sql.init.mode=always`) and Hibernate
+               * checks the entities against it (`ddl-auto=validate`):
+               * - a `CREATE TABLE IF NOT EXISTS` per table, a table after the
+               *   tables its foreign keys reference (a reference to itself does
+               *   not count, a cycle keeps the order of the model and warns);
+               * - a column per column of the table, its SQL type as the model
+               *   says, `NOT NULL` when it is mandatory;
+               * - the primary key, then a foreign key per reference;
+               * - each identifier between backquotes (`Order` is a reserved word).
+               */
+              export default function (source) {
+                const context: any = source
+                const database = databaseOf(context)
+                const name = database ? ` ${database.name}` : ''
+                const tables: any[] = database ? orderOf(database) : []
+                return new SqlFile({
+                  name: this.fileNameOf('schema', 'sql'),
+                  text: this.textOf([
+                    `-- The schema of the database${name}, generated from the model.`,
+                    '-- Played by Spring at start, checked by Hibernate.',
+                    ...tables.flatMap((table: any) => ['', ...tableLines(table)])
+                  ])
+                })
+              }
+
+              /** The SQL database of the application, the first one. */
+              function databaseOf(context: any): any {
+                const stores: any[] = context.application?.stores ?? []
+                const sql = stores.filter((store: any) =>
+                  store.instanceOf?._path?.() === 'Application:sql.Database')
+                if (sql.length === 0) {
+                  log.warning(`${context.name}: no SQL database, an empty schema`)
+                }
+                return sql[0]
+              }
+
+              /** The tables a table references, itself left out. */
+              function targetsOf(table: any): any[] {
+                const references: any[] = table.references ?? []
+                return references
+                  .map((reference: any) => reference.target)
+                  .filter((target: any) => !!target && target !== table)
+              }
+
+              /**
+               * The tables in the order they can be created: each time, the first
+               * table of the model whose targets are all placed. When none is, a
+               * cycle: the first table left, with a warning.
+               */
+              function orderOf(database: any): any[] {
+                const left: any[] = [...(database.records ?? [])]
+                const placed: any[] = []
+                while (left.length > 0) {
+                  let next = left.find((table: any) => targetsOf(table)
+                    .every((t: any) => placed.includes(t) || !left.includes(t)))
+                  if (!next) {
+                    next = left[0]
+                    log.warning(`${next.name}: a cycle of foreign keys, model order`)
+                  }
+                  placed.push(next)
+                  left.splice(left.indexOf(next), 1)
+                }
+                return placed
+              }
+
+              /** An identifier between backquotes. */
+              function quoted(name: string): string {
+                return `\`${String(name).replace(/`/g, '``')}\``
+              }
+
+              /**
+               * The SQL type of a column: the one of the model, else one from its
+               * type with a warning.
+               */
+              function sqlTypeOf(table: any, column: any): string {
+                if (column.sqlType) return column.sqlType
+                const type = column.multiple ? 'JSON'
+                  : column.type?.name === 'Number' ? 'DOUBLE'
+                  : column.type?.name === 'Boolean' ? 'BOOLEAN'
+                  : column.type?.name === 'Date' ? 'DATETIME(6)'
+                  : 'VARCHAR(255)'
+                log.warning(`${table.name}.${column.name}: no SQL type, ${type}`)
+                return type
+              }
+
+              /** The lines of the creation of a table. */
+              function tableLines(table: any): string[] {
+                const columns: any[] = table.fields ?? []
+                const references: any[] = table.references ?? []
+                if (!table.key) log.warning(`${table.name}: no primary key`)
+                const parts = [
+                  ...columns.map((column: any) => {
+                    const notNull = column.mandatory ? ' NOT NULL' : ''
+                    const type = sqlTypeOf(table, column)
+                    return `${quoted(column.name)} ${type}${notNull}`
+                  }),
+                  ...(table.key ? [`PRIMARY KEY (${quoted(table.key.name)})`] : []),
+                  ...references.flatMap((reference: any) =>
+                    foreignKeyOf(table, reference))
+                ]
+                return [
+                  `CREATE TABLE IF NOT EXISTS ${quoted(table.name)} (`,
+                  ...parts.map((part: string, i: number) =>
+                    `  ${part}${i < parts.length - 1 ? ',' : ''}`),
+                  ');'
+                ]
+              }
+
+              /**
+               * The foreign key of a reference: its column to the primary key of
+               * its target. A reference without column or target key: none, with
+               * a warning.
+               */
+              function foreignKeyOf(table: any, reference: any): string[] {
+                const column = reference.column
+                const key = reference.target?.key
+                if (!column || !key) {
+                  log.warning(`${table.name}.${reference.name}: no column or key`)
+                  return []
+                }
+                const target = quoted(reference.target.name)
+                return [`FOREIGN KEY (${quoted(column.name)}) ` +
+                  `REFERENCES ${target} (${quoted(key.name)})`]
+              }
+      - name: contextToSchema
+        instanceOf: SpringAngularToCode:spring.ContextToSchema
+        source: Spring:boot.Context
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+  - name: angular
+    instanceOf: Core:Package
+    elements:
+      - name: FrontendToProject
+        instanceOf: Core:Class
+        icon: thesvg:angular
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: apiUrl
+            instanceOf: Core:PrimitiveProperty
+            type: Core:String
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Angular:Frontend
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: FileSystem:Entry
+            code: |
+              import {
+                CssFile,
+                Folder,
+                HtmlFile,
+                MarkdownFile,
+                TextFile,
+                TypeScriptFile
+              } from 'FileSystem'
+              import {
+                layoutToFile,
+                pageComponentToFile,
+                serviceToFile
+              } from 'SpringAngularToCode/angular'
+              import { resourceToPayloadTypes } from 'ApplicationToCode/code'
+
+              /**
+               * FrontendToProject — the head pattern of an Angular client (rules 2,
+               * 5 and 6). Branched on an Angular frontend, it writes an Angular
+               * project in a system folder, standalone components, zoneless:
+               * - `package.json`, `angular.json` (the application builder, the dev
+               *   server on port 4200 with the proxy), `tsconfig.json`,
+               *   `tsconfig.app.json`, `proxy.conf.json` (the base path of each API
+               *   forwarded to the option `apiUrl`), `.gitignore` and `README.md`;
+               * - under `src/`: `index.html`, `main.ts`, `styles.css`, and under
+               *   `src/app/`: `app.config.ts` (the router and the HTTP client),
+               *   `app.routes.ts` (a route per route of the frontend), the root
+               *   component (LayoutToFile), a file per page component
+               *   (PageComponentToFile), a service per service of the frontend
+               *   (ServiceToFile) and the types of the payloads of each resource
+               *   they call (ResourceToPayloadTypes).
+               * A page without page component, a route to a component of another
+               * frontend or a service without resource is an error on the Mapping.
+               */
+              export default function (source) {
+                const frontend: any = source
+                if (!frontend.application) {
+                  throw new Error(`${frontend.name}: the frontend has no application`)
+                }
+                const routes: any[] = frontend.routes ?? []
+                routes.forEach((route: any) => checkRoute(frontend, route))
+                const components: any[] = frontend.components ?? []
+                const layout = components.find((c: any) =>
+                  c.instanceOf?._inherits(e('Application:spa.Layout')))
+                if (!layout) log.warning(`${frontend.name}: no layout`)
+                const pageComponents = components.filter((c: any) =>
+                  c.instanceOf?._inherits(e('Application:spa.PageComponent')))
+                checkPages(frontend, pageComponents)
+                const services: any[] = frontend.services ?? []
+                const resources = services
+                  .map((service: any) => service.resource)
+                  .filter((r: any, i: number, all: any[]) => r && all.indexOf(r) === i)
+                const apiUrl = this.apiUrl || 'http://localhost:8080'
+                const basePaths = basePathsOf(frontend)
+                const name = `${this.kebabOf(frontend.application.name)}-client`
+                const textFile = (file: string, ext: string, type: string, lines: string[]) =>
+                  new TextFile({
+                    name: this.fileNameOf(file, ext),
+                    fileType: type,
+                    text: this.textOf(lines)
+                  })
+                const tsFile = (file: string, lines: string[]) =>
+                  new TypeScriptFile({
+                    name: this.fileNameOf(file, 'ts'),
+                    text: this.textOf(lines)
+                  })
+                return [
+                  textFile('package', 'json', 'json', packageOf(name)),
+                  textFile('angular', 'json', 'json', angularJsonOf(name)),
+                  textFile('tsconfig', 'json', 'json', TSCONFIG),
+                  textFile('tsconfig__app', 'json', 'json', TSCONFIG_APP),
+                  textFile('proxy__conf', 'json', 'json', proxyOf(basePaths, apiUrl)),
+                  textFile('', 'gitignore', 'plaintext', ['node_modules', 'dist', '.angular']),
+                  new MarkdownFile({
+                    name: this.fileNameOf('README', 'md'),
+                    text: this.textOf(readmeOf(this, frontend, basePaths, apiUrl))
+                  }),
+                  new Folder({
+                    name: 'src',
+                    entries: [
+                      new HtmlFile({
+                        name: this.fileNameOf('index', 'html'),
+                        text: this.textOf(indexHtmlOf(frontend))
+                      }),
+                      tsFile('main', MAIN),
+                      new CssFile({
+                        name: this.fileNameOf('styles', 'css'),
+                        text: this.textOf(STYLES)
+                      }),
+                      new Folder({
+                        name: 'app',
+                        entries: [
+                          tsFile('app__config', APP_CONFIG),
+                          tsFile('app__routes', routesOf(this, routes)),
+                          layout ? map(layout, layoutToFile) : tsFile('app__component', ROOT_ALONE),
+                          new Folder({
+                            name: 'pages',
+                            entries: pageComponents
+                              .map((c: any) => map(c, pageComponentToFile))
+                          }),
+                          new Folder({
+                            name: 'api',
+                            entries: services.map((s: any) => map(s, serviceToFile))
+                          }),
+                          new Folder({
+                            name: 'types',
+                            entries: resources
+                              .map((r: any) => map(r, resourceToPayloadTypes))
+                          })
+                        ]
+                      })
+                    ]
+                  })
+                ]
+              }
+
+              /**
+               * A route leads to a page component of its own frontend (rule 4):
+               * any other route is an error on the Mapping.
+               */
+              function checkRoute(frontend: any, route: any): void {
+                const component = route.component
+                if (!component) {
+                  throw new Error(`${route.name}: the route has no component`)
+                }
+                if (component.frontend !== frontend) {
+                  const owner = component.frontend?.name ?? 'no frontend'
+                  throw new Error(
+                    `${route.name}: ${component.name} belongs to ${owner}`)
+                }
+              }
+
+              /**
+               * Each page of the frontend has a page component (rule 4): a page
+               * without one is an error on the Mapping.
+               */
+              function checkPages(frontend: any, pageComponents: any[]): void {
+                const pages: any[] = frontend.pages ?? []
+                for (const page of pages) {
+                  if (pageComponents.some((c: any) => c.page === page)) continue
+                  throw new Error(`${page.name}: the page has no page component`)
+                }
+              }
+
+              /** The versions of Angular the project pins (rule 5). */
+              const ANGULAR = '22.2.3'
+              const ANGULAR_CLI = '22.2.4'
+              const TYPESCRIPT = '6.0.2'
+              const RXJS = '7.8.2'
+              const NODE = '22.22.3+ or 24.15+'
+
+              /** The lines of `package.json`, versions pinned (rule 5). */
+              function packageOf(name: string): string[] {
+                return [
+                  '{',
+                  `  "name": "${name}",`,
+                  '  "version": "0.1.0",',
+                  '  "private": true,',
+                  '  "scripts": {',
+                  '    "start": "ng serve",',
+                  '    "build": "ng build",',
+                  '    "typecheck": "tsc -p tsconfig.app.json --noEmit"',
+                  '  },',
+                  '  "dependencies": {',
+                  `    "@angular/common": "${ANGULAR}",`,
+                  `    "@angular/compiler": "${ANGULAR}",`,
+                  `    "@angular/core": "${ANGULAR}",`,
+                  `    "@angular/forms": "${ANGULAR}",`,
+                  `    "@angular/platform-browser": "${ANGULAR}",`,
+                  `    "@angular/router": "${ANGULAR}",`,
+                  `    "rxjs": "${RXJS}"`,
+                  '  },',
+                  '  "devDependencies": {',
+                  `    "@angular/build": "${ANGULAR_CLI}",`,
+                  `    "@angular/cli": "${ANGULAR_CLI}",`,
+                  `    "@angular/compiler-cli": "${ANGULAR}",`,
+                  `    "typescript": "${TYPESCRIPT}"`,
+                  '  }',
+                  '}'
+                ]
+              }
+
+              /**
+               * The lines of `angular.json`: one project, the application builder,
+               * the dev server on port 4200 with `proxy.conf.json`.
+               */
+              function angularJsonOf(name: string): string[] {
+                return [
+                  '{',
+                  '  "$schema": "./node_modules/@angular/cli/lib/config/schema.json",',
+                  '  "version": 1,',
+                  '  "projects": {',
+                  `    "${name}": {`,
+                  '      "projectType": "application",',
+                  '      "root": "",',
+                  '      "sourceRoot": "src",',
+                  '      "prefix": "app",',
+                  '      "architect": {',
+                  '        "build": {',
+                  '          "builder": "@angular/build:application",',
+                  '          "options": {',
+                  '            "browser": "src/main.ts",',
+                  '            "index": "src/index.html",',
+                  '            "tsConfig": "tsconfig.app.json",',
+                  '            "styles": ["src/styles.css"],',
+                  '            "outputPath": "dist"',
+                  '          }',
+                  '        },',
+                  '        "serve": {',
+                  '          "builder": "@angular/build:dev-server",',
+                  '          "options": {',
+                  `            "buildTarget": "${name}:build",`,
+                  '            "port": 4200,',
+                  '            "proxyConfig": "proxy.conf.json"',
+                  '          }',
+                  '        }',
+                  '      }',
+                  '    }',
+                  '  }',
+                  '}'
+                ]
+              }
+
+              /**
+               * The lines of `tsconfig.json`: strict, modules kept for the bundler,
+               * strict templates for the Angular compiler.
+               */
+              const TSCONFIG = [
+                '{',
+                '  "compilerOptions": {',
+                '    "strict": true,',
+                '    "target": "ES2022",',
+                '    "module": "preserve",',
+                '    "moduleResolution": "bundler",',
+                '    "lib": ["ES2022", "DOM"],',
+                '    "isolatedModules": true,',
+                '    "skipLibCheck": true,',
+                '    "noEmit": true',
+                '  },',
+                '  "angularCompilerOptions": {',
+                '    "strictTemplates": true,',
+                '    "strictInjectionParameters": true,',
+                '    "strictInputAccessModifiers": true',
+                '  }',
+                '}'
+              ]
+
+              /** The lines of `tsconfig.app.json`: the app from `main.ts`. */
+              const TSCONFIG_APP = [
+                '{',
+                '  "extends": "./tsconfig.json",',
+                '  "compilerOptions": {',
+                '    "types": []',
+                '  },',
+                '  "files": ["src/main.ts"],',
+                '  "include": ["src/**/*.ts"]',
+                '}'
+              ]
+
+              /**
+               * The base paths the client calls: the base path of each API of the
+               * application, once each, `/api` when none says.
+               */
+              function basePathsOf(frontend: any): string[] {
+                const apis: any[] = frontend.application.apis ?? []
+                const paths = apis
+                  .map((api: any) => String(api.basePath ?? '').replace(/\/+$/, ''))
+                  .filter((p: string, i: number, all: string[]) =>
+                    p !== '' && all.indexOf(p) === i)
+                if (paths.length === 0) {
+                  log.warning(`${frontend.name}: no API base path, /api proxied`)
+                  return ['/api']
+                }
+                return paths
+              }
+
+              /**
+               * The lines of `proxy.conf.json`: each base path of the API forwarded
+               * to `apiUrl` by the dev server, so the client calls it without CORS.
+               */
+              function proxyOf(basePaths: string[], apiUrl: string): string[] {
+                return [
+                  '{',
+                  ...basePaths.flatMap((path: string, i: number, all: string[]) => [
+                    `  "${path}": {`,
+                    `    "target": "${apiUrl}",`,
+                    '    "secure": false',
+                    `  }${i < all.length - 1 ? ',' : ''}`
+                  ]),
+                  '}'
+                ]
+              }
+
+              /** The title of the application: its title, else its name. */
+              function titleOf(frontend: any): string {
+                return frontend.application.title || frontend.application.name
+              }
+
+              /**
+               * The lines of `index.html`: the base of the URLs the router and the
+               * bundles resolve, the root element.
+               */
+              function indexHtmlOf(frontend: any): string[] {
+                return [
+                  '<!doctype html>',
+                  '<html lang="en">',
+                  '  <head>',
+                  '    <meta charset="UTF-8" />',
+                  '    <meta name="viewport" content="width=device-width, initial-scale=1.0" />',
+                  `    <title>${titleOf(frontend)}</title>`,
+                  '    <base href="/" />',
+                  '  </head>',
+                  '  <body>',
+                  '    <app-root></app-root>',
+                  '  </body>',
+                  '</html>'
+                ]
+              }
+
+              /** The lines of `src/main.ts`: the root component started. */
+              const MAIN = [
+                "import { bootstrapApplication } from '@angular/platform-browser'",
+                "import { AppComponent } from './app/app.component'",
+                "import { appConfig } from './app/app.config'",
+                '',
+                'bootstrapApplication(AppComponent, appConfig)',
+                '  .catch((error) => console.error(error))'
+              ]
+
+              /**
+               * The lines of `src/app/app.config.ts`: zoneless change detection,
+               * the router with the routes of the frontend, the HTTP client.
+               */
+              const APP_CONFIG = [
+                "import { provideHttpClient } from '@angular/common/http'",
+                'import {',
+                '  ApplicationConfig,',
+                '  provideZonelessChangeDetection',
+                "} from '@angular/core'",
+                "import { provideRouter } from '@angular/router'",
+                "import { routes } from './app.routes'",
+                '',
+                'export const appConfig: ApplicationConfig = {',
+                '  providers: [',
+                '    provideZonelessChangeDetection(),',
+                '    provideRouter(routes),',
+                '    provideHttpClient()',
+                '  ]',
+                '}'
+              ]
+
+              /** The root component without layout: the outlet alone. */
+              const ROOT_ALONE = [
+                "import { Component } from '@angular/core'",
+                "import { RouterOutlet } from '@angular/router'",
+                '',
+                '@Component({',
+                "  selector: 'app-root',",
+                '  imports: [RouterOutlet],',
+                '  template: `<router-outlet />`',
+                '})',
+                'export class AppComponent {}'
+              ]
+
+              /**
+               * The routes in the order the router of Angular must try them: it
+               * takes the first one that matches, so a path with fewer parameters
+               * comes first (`commandes/new` before `commandes/:id`), the order of
+               * the model kept otherwise.
+               */
+              function byMatch(routes: any[]): any[] {
+                const params = (route: any) =>
+                  (String(route.path ?? '').match(/:\w+/g) ?? []).length
+                return routes
+                  .map((route: any, i: number) => ({ route, i }))
+                  .sort((a: any, b: any) =>
+                    params(a.route) - params(b.route) || a.i - b.i)
+                  .map(({ route }: any) => route)
+              }
+
+              /**
+               * The lines of `src/app/app.routes.ts`: a route per route of the
+               * frontend, its path as the model says without the leading slash,
+               * its page component imported from `./pages/`, the routes in the
+               * order the router tries them (`byMatch`).
+               */
+              function routesOf(pattern: any, model: any[]): string[] {
+                const routes = byMatch(model)
+                const names = routes
+                  .map((route: any) => route.component.name)
+                  .filter((c: string, i: number, all: string[]) => all.indexOf(c) === i)
+                return [
+                  "import { Routes } from '@angular/router'",
+                  ...names.map((c: string) => {
+                    const file = `./pages/${pattern.kebabOf(c)}.component`
+                    return `import { ${pattern.pascalOf(c)}Component } from '${file}'`
+                  }),
+                  '',
+                  'export const routes: Routes = [',
+                  ...routes.map((route: any, i: number) => {
+                    const path = String(route.path ?? '').replace(/^\/+/, '')
+                    const c = `${pattern.pascalOf(route.component.name)}Component`
+                    const comma = i < routes.length - 1 ? ',' : ''
+                    return `  { path: '${path}', component: ${c} }${comma}`
+                  }),
+                  ']'
+                ]
+              }
+
+              /**
+               * The lines of `src/styles.css`: the layout of the client, no
+               * component library (rule 7), the same as the React client. The bar
+               * marks the open page (the `active` class of routerLinkActive), each
+               * page is a card, a list a full width table, a detail a grid of
+               * labels and values, a form a column of labelled controls; the link
+               * `New` is the main button, `Delete` is red.
+               */
+              const STYLES = [
+                ':root {',
+                '  --primary: #1565c0;',
+                '  --danger: #c62828;',
+                '  --text: #1f2933;',
+                '  --muted: #5f6b7a;',
+                '  --border: #dde1e6;',
+                '  --background: #f4f6f8;',
+                '}',
+                '',
+                '* {',
+                '  box-sizing: border-box;',
+                '}',
+                '',
+                'body {',
+                '  margin: 0;',
+                '  font-family: system-ui, "Segoe UI", Roboto, sans-serif;',
+                '  line-height: 1.5;',
+                '  color: var(--text);',
+                '  background: var(--background);',
+                '}',
+                '',
+                'a {',
+                '  color: var(--primary);',
+                '}',
+                '',
+                'nav {',
+                '  position: sticky;',
+                '  top: 0;',
+                '  z-index: 1;',
+                '  display: flex;',
+                '  flex-wrap: wrap;',
+                '  gap: 0.25rem;',
+                '  align-items: center;',
+                '  padding: 0.5rem 1.5rem;',
+                '  color: #fff;',
+                '  background: #37474f;',
+                '  box-shadow: 0 2px 4px rgb(0 0 0 / 20%);',
+                '}',
+                '',
+                'nav strong {',
+                '  margin-right: 1.5rem;',
+                '  font-size: 1.25rem;',
+                '}',
+                '',
+                'nav a {',
+                '  padding: 0.375rem 0.75rem;',
+                '  border-radius: 4px;',
+                '  color: inherit;',
+                '  text-decoration: none;',
+                '  opacity: 0.85;',
+                '}',
+                '',
+                'nav a:hover {',
+                '  background: rgb(255 255 255 / 12%);',
+                '  opacity: 1;',
+                '}',
+                '',
+                'nav a.active {',
+                '  font-weight: 600;',
+                '  background: rgb(255 255 255 / 20%);',
+                '  opacity: 1;',
+                '}',
+                '',
+                'main {',
+                '  max-width: 1100px;',
+                '  margin: 0 auto;',
+                '  padding: 2rem 1.5rem;',
+                '}',
+                '',
+                'section {',
+                '  padding: 1.5rem 2rem;',
+                '  border: 1px solid var(--border);',
+                '  border-radius: 8px;',
+                '  background: #fff;',
+                '  box-shadow: 0 1px 2px rgb(0 0 0 / 6%);',
+                '}',
+                '',
+                'h1 {',
+                '  margin: 0 0 1.25rem;',
+                '  font-size: 1.5rem;',
+                '  font-weight: 600;',
+                '}',
+                '',
+                'table {',
+                '  width: 100%;',
+                '  margin-top: 1.25rem;',
+                '  border-collapse: collapse;',
+                '}',
+                '',
+                'th,',
+                'td {',
+                '  padding: 0.625rem 0.75rem;',
+                '  border-bottom: 1px solid var(--border);',
+                '  text-align: left;',
+                '}',
+                '',
+                'th {',
+                '  font-size: 0.8125rem;',
+                '  font-weight: 600;',
+                '  letter-spacing: 0.02em;',
+                '  text-transform: uppercase;',
+                '  color: var(--muted);',
+                '  background: #f8f9fb;',
+                '}',
+                '',
+                'tbody tr:hover {',
+                '  background: #f1f5fb;',
+                '}',
+                '',
+                'dl {',
+                '  display: grid;',
+                '  grid-template-columns: max-content 1fr;',
+                '  gap: 0.625rem 2rem;',
+                '  margin: 0 0 1.5rem;',
+                '}',
+                '',
+                'dt {',
+                '  font-weight: 600;',
+                '  color: var(--muted);',
+                '}',
+                '',
+                'dd {',
+                '  margin: 0;',
+                '}',
+                '',
+                'form {',
+                '  display: grid;',
+                '  gap: 1rem;',
+                '  max-width: 32rem;',
+                '}',
+                '',
+                'form label {',
+                '  display: grid;',
+                '  gap: 0.25rem;',
+                '  font-weight: 600;',
+                '}',
+                '',
+                'form input,',
+                'form select,',
+                'form textarea {',
+                '  width: 100%;',
+                '  padding: 0.5rem 0.625rem;',
+                '  border: 1px solid #c3cad3;',
+                '  border-radius: 4px;',
+                '  font: inherit;',
+                '  font-weight: normal;',
+                '  background: #fff;',
+                '}',
+                '',
+                'form input[type="checkbox"] {',
+                '  justify-self: start;',
+                '  width: auto;',
+                '}',
+                '',
+                'form input:focus,',
+                'form select:focus,',
+                'form textarea:focus {',
+                '  border-color: var(--primary);',
+                '  outline: 2px solid var(--primary);',
+                '  outline-offset: -1px;',
+                '}',
+                '',
+                'button,',
+                'section > a,',
+                'section > p > a {',
+                '  display: inline-block;',
+                '  padding: 0.5rem 1rem;',
+                '  border: 1px solid var(--primary);',
+                '  border-radius: 4px;',
+                '  font: inherit;',
+                '  font-weight: 600;',
+                '  line-height: 1.25;',
+                '  text-decoration: none;',
+                '  cursor: pointer;',
+                '}',
+                '',
+                'button,',
+                'section > a {',
+                '  color: #fff;',
+                '  background: var(--primary);',
+                '}',
+                '',
+                'button:hover,',
+                'section > a:hover {',
+                '  filter: brightness(0.9);',
+                '}',
+                '',
+                'form button {',
+                '  justify-self: start;',
+                '}',
+                '',
+                'section > p:not(.error) {',
+                '  display: flex;',
+                '  flex-wrap: wrap;',
+                '  gap: 0.75rem;',
+                '  margin: 0;',
+                '}',
+                '',
+                'section > p > a {',
+                '  color: var(--primary);',
+                '  background: transparent;',
+                '}',
+                '',
+                'section > p > a:hover {',
+                '  background: #e8f0fb;',
+                '}',
+                '',
+                'section > p > button {',
+                '  margin-left: auto;',
+                '  border-color: var(--danger);',
+                '  color: var(--danger);',
+                '  background: transparent;',
+                '}',
+                '',
+                'section > p > button:hover {',
+                '  filter: none;',
+                '  background: #fdecea;',
+                '}',
+                '',
+                '.error {',
+                '  padding: 0.75rem 1rem;',
+                '  border: 1px solid #f5c2c0;',
+                '  border-radius: 4px;',
+                '  color: var(--danger);',
+                '  background: #fdecea;',
+                '}'
+              ]
+
+              /** The lines of `README.md`: how to run the client alone. */
+              function readmeOf(
+                pattern: any,
+                frontend: any,
+                basePaths: string[],
+                apiUrl: string
+              ): string[] {
+                const services: any[] = frontend.services ?? []
+                const forwarded = basePaths.map((p: string) => `\`${p}\``)
+                return [
+                  `# ${titleOf(frontend)} — Angular`,
+                  '',
+                  `Generated from the Angular frontend \`${frontend.name}\` of the application`,
+                  `\`${frontend.application.name}\`. Regenerated at each change of the model: edit the`,
+                  'model, not these files.',
+                  '',
+                  '## Run',
+                  '',
+                  `Node ${NODE} (the versions Angular ${ANGULAR} accepts).`,
+                  '',
+                  `1. The API server, listening on \`${apiUrl}\`.`,
+                  '2. `npm install`',
+                  '3. `npm start` — the client opens on `http://localhost:4200`; the dev',
+                  `   server forwards ${forwarded.join(', ')} to the API server.`,
+                  '',
+                  '`npm run typecheck` checks the types, `npm run build` writes the',
+                  'client under `dist/`.',
+                  '',
+                  '## Services',
+                  '',
+                  ...services.map((service: any) => {
+                    const route = service.resource
+                      ? pattern.routeOf(service.resource)
+                      : '—'
+                    const file = `src/app/api/${pattern.kebabOf(service.name)}.service.ts`
+                    return `- \`${file}\` — \`${route}\``
+                  })
+                ]
+              }
+      - name: ServiceToFile
+        instanceOf: Core:Class
+        icon: mui:CloudSync
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Angular:Service
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:TypeScriptFile
+            code: |
+              import { TypeScriptFile } from 'FileSystem'
+
+              /**
+               * ServiceToFile — the service of an Angular frontend (rule 10), in
+               * `src/app/api/`: an injectable class, a method per endpoint the
+               * service serves, named after its operation (`list` · `get` ·
+               * `create` · `update` · `remove`). Each one calls the HTTP client of
+               * Angular on the route of the resource and the path of the endpoint
+               * and returns an Observable of the payload; an HTTP error reaches
+               * the component that subscribed. An endpoint of an unknown
+               * operation, or a second one of the same operation, is skipped with
+               * a warning.
+               */
+              export default function (source) {
+                const service: any = source
+                const resource: any = service.resource
+                if (!resource) {
+                  throw new Error(`${service.name}: the service has no resource`)
+                }
+                const endpoints = servedOf(this, service)
+                const types = typesOf(this, endpoints)
+                const typeFile = this.pascalOf(resource.name)
+                const className = `${this.pascalOf(service.name)}Service`
+                return new TypeScriptFile({
+                  name: this.fileNameOf(`${this.kebabOf(service.name)}__service`, 'ts'),
+                  text: this.textOf([
+                    "import { HttpClient } from '@angular/common/http'",
+                    "import { Injectable, inject } from '@angular/core'",
+                    "import { Observable } from 'rxjs'",
+                    ...(types.length > 0
+                      ? [`import type { ${types.join(', ')} } from '../types/${typeFile}'`]
+                      : []),
+                    '',
+                    `const route = '${this.routeOf(resource)}'`,
+                    '',
+                    "@Injectable({ providedIn: 'root' })",
+                    `export class ${className} {`,
+                    '  private readonly http = inject(HttpClient)',
+                    ...endpoints.flatMap((endpoint: any) =>
+                      ['', ...methodOf(this, endpoint)]),
+                    '}'
+                  ])
+                })
+              }
+
+              /** The method of an operation: `delete` is a reserved word. */
+              const METHOD_NAMES: Record<string, string> = {
+                list: 'list',
+                get: 'get',
+                create: 'create',
+                update: 'update',
+                delete: 'remove'
+              }
+
+              /**
+               * The endpoints the service serves: the first one of each known
+               * operation, in the order of the model.
+               */
+              function servedOf(pattern: any, service: any): any[] {
+                const seen = new Set<string>()
+                const endpoints: any[] = service.endpoints ?? []
+                return endpoints.filter((endpoint: any) => {
+                  const operation = pattern.operationOf(endpoint)
+                  if (operation === 'unknown') {
+                    const what = `${endpoint.method} ${endpoint.path ?? ''}`
+                    log.warning(`${service.name}: ${what} has no known operation, skipped`)
+                    return false
+                  }
+                  if (seen.has(operation)) {
+                    log.warning(`${service.name}: a second ${operation} endpoint, skipped`)
+                    return false
+                  }
+                  seen.add(operation)
+                  return true
+                })
+              }
+
+              /** The payload types the methods name, once each. */
+              function typesOf(pattern: any, endpoints: any[]): string[] {
+                const names = endpoints
+                  .flatMap((endpoint: any) => [endpoint.request, endpoint.response])
+                  .filter((payload: any) => !!payload)
+                  .map((payload: any) => pattern.pascalOf(payload.name))
+                return names.filter((name: string, i: number) => names.indexOf(name) === i)
+              }
+
+              /** The path parameters of an endpoint, in their order. */
+              function parametersOf(endpoint: any): string[] {
+                const path = String(endpoint.path ?? '')
+                return [...path.matchAll(/\{([^}]+)\}/g)].map((m: any) => m[1])
+              }
+
+              /**
+               * The URL expression of an endpoint: the route of the resource,
+               * then its path with each `{parameter}` encoded.
+               */
+              function urlOf(pattern: any, endpoint: any): string {
+                const path = String(endpoint.path ?? '').replace(/\/+$/, '')
+                if (path === '') return 'route'
+                const filled = path.replace(/\{([^}]+)\}/g, (_: string, p: string) =>
+                  `\${encodeURIComponent(${pattern.camelOf(p)})}`)
+                return `\`\${route}${filled.startsWith('/') ? '' : '/'}${filled}\``
+              }
+
+              /** The type a method emits. */
+              function resultOf(pattern: any, endpoint: any): string {
+                if (!endpoint.response) return 'void'
+                const type = pattern.pascalOf(endpoint.response.name)
+                const many =
+                  endpoint.returnsList || pattern.operationOf(endpoint) === 'list'
+                return many ? `${type}[]` : type
+              }
+
+              /** The lines of the method of an endpoint. */
+              function methodOf(pattern: any, endpoint: any): string[] {
+                const name = METHOD_NAMES[pattern.operationOf(endpoint)]
+                const params = parametersOf(endpoint)
+                  .map((p: string) => `${pattern.camelOf(p)}: string`)
+                const request = endpoint.request
+                  ? pattern.pascalOf(endpoint.request.name)
+                  : undefined
+                if (request) params.push(`input: ${request}`)
+                const verb = String(endpoint.method ?? 'GET').toLowerCase()
+                const result = resultOf(pattern, endpoint)
+                const args = [urlOf(pattern, endpoint)]
+                if (request && verb !== 'get' && verb !== 'delete') args.push('input')
+                return [
+                  `  ${name}(${params.join(', ')}): Observable<${result}> {`,
+                  `    return this.http.${verb}<${result}>(${args.join(', ')})`,
+                  '  }'
+                ]
+              }
+      - name: LayoutToFile
+        instanceOf: Core:Class
+        icon: mui:ViewQuilt
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Application:spa.Layout
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:TypeScriptFile
+            code: |
+              import { TypeScriptFile } from 'FileSystem'
+
+              /**
+               * LayoutToFile — the root component of an Angular frontend (rule 7),
+               * `src/app/app.component.ts`: the navigation bar with the title and
+               * the color of its Navbar child and a link per menu entry of the
+               * frontend to the route of its page, the open page marked by the
+               * `active` class, then the current page below (`<router-outlet />`).
+               * No component library: HTML and the rules of `styles.css`.
+               */
+              export default function (source) {
+                const layout: any = source
+                const frontend: any = layout.frontend
+                const children: any[] = layout.children ?? []
+                const navbar = children.find((child: any) =>
+                  child.instanceOf?._inherits(e('Application:spa.Navbar')))
+                const links = linksOf(frontend?.menu ?? [])
+                const uses = links.length > 0
+                  ? ['RouterLink', 'RouterLinkActive', 'RouterOutlet']
+                  : ['RouterOutlet']
+                return new TypeScriptFile({
+                  name: this.fileNameOf('app__component', 'ts'),
+                  text: this.textOf([
+                    "import { Component } from '@angular/core'",
+                    `import { ${uses.join(', ')} } from '@angular/router'`,
+                    '',
+                    '@Component({',
+                    "  selector: 'app-root',",
+                    `  imports: [${uses.join(', ')}],`,
+                    '  template: `',
+                    ...navLines(navbar, links),
+                    '    <main>',
+                    '      <router-outlet />',
+                    '    </main>',
+                    '  `',
+                    '})',
+                    'export class AppComponent {}'
+                  ])
+                })
+              }
+
+              /**
+               * A text in an Angular template: each character the template, HTML
+               * or the template literal reads written as a character reference.
+               */
+              function htmlText(text: string): string {
+                return String(text ?? '').replace(/[&<>"{}@`$\\]/g,
+                  (c: string) => `&#${c.charCodeAt(0)};`)
+              }
+
+              /** The menu entries that lead to a page with a route. */
+              function linksOf(menu: any[]): any[] {
+                return menu.filter((entry: any) => {
+                  if (entry.page?.route) return true
+                  log.warning(`${entry.name}: the menu entry has no page route`)
+                  return false
+                })
+              }
+
+              /** The bar: its color, its title, a link per menu entry. */
+              function navLines(navbar: any, links: any[]): string[] {
+                const color = navbar?.color
+                  ? ` style="background: ${htmlText(navbar.color)}"`
+                  : ''
+                return [
+                  `    <nav${color}>`,
+                  ...(navbar?.title
+                    ? [`      <strong>${htmlText(navbar.title)}</strong>`]
+                    : []),
+                  ...links.map((entry: any) => {
+                    const to = htmlText(entry.page.route)
+                    const label = htmlText(entry.label ?? entry.name)
+                    const attributes = `routerLink="${to}" routerLinkActive="active"`
+                    return `      <a ${attributes}>${label}</a>`
+                  }),
+                  '    </nav>'
+                ]
+              }
+      - name: PageComponentToFile
+        instanceOf: Core:Class
+        icon: mui:WebAsset
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Application:spa.PageComponent
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: FileSystem:TypeScriptFile
+            code: |
+              import { TypeScriptFile } from 'FileSystem'
+
+              /**
+               * PageComponentToFile — a page component of an Angular frontend
+               * (rules 8, 9 and 12), in `src/app/pages/`: a standalone component
+               * with an inline template, named after the page component
+               * (`CommandeNewPage` gives `commande-new-page.component.ts` and
+               * `CommandeNewPageComponent`). Its state is held in signals, the
+               * change detection being zoneless. What it renders depends on its
+               * child:
+               * - a Table: a column per field of the page, a row per element that
+               *   `list` returns, each row a link to its `rowLink` page, and a
+               *   « New » link to the creation form of the resource;
+               * - a Detail: the element `get` reads, a line per field, the links
+               *   of the page and a « Delete » button when the service serves the
+               *   deletion;
+               * - a Form: a control per field driven by the template (`ngModel`),
+               *   the validation of the browser kept (`ngNativeValidate`), filled
+               *   by `get` when the route has an identifier, sent by `create` or
+               *   `update`, then the detail.
+               * A page whose service lacks the operation it needs shows « Not
+               * available » and writes a warning. An error of the API shows in a
+               * banner above the content: its status and its body.
+               */
+              export default function (source) {
+                const component: any = source
+                const page: any = component.page
+                if (!page) {
+                  throw new Error(`${component.name}: the page component has no page`)
+                }
+                const ctx = contextOf(this, component, page)
+                const parts = !ctx.child
+                  ? notAvailable(ctx, 'no table, detail or form')
+                  : ctx.kind === 'table' ? tableOf(ctx)
+                  : ctx.kind === 'detail' ? detailOf(ctx)
+                  : formOf(ctx)
+                return new TypeScriptFile({
+                  name: this.fileNameOf(`${ctx.kebab}__component`, 'ts'),
+                  text: this.textOf(fileLines(ctx, parts))
+                })
+              }
+
+              /** Whether an element is an instance of a class or a subclass. */
+              function isA(element: any, path: string): boolean {
+                return !!element?.instanceOf?._inherits(e(path))
+              }
+
+              /** The kind of a child: `table`, `detail`, `form` or none. */
+              function kindOf(child: any): string | undefined {
+                if (isA(child, 'Application:spa.Table')) return 'table'
+                if (isA(child, 'Application:spa.Detail')) return 'detail'
+                if (isA(child, 'Application:spa.Form')) return 'form'
+                return undefined
+              }
+
+              /**
+               * The endpoints a service serves by operation: the first one of each
+               * known operation, as ServiceToFile writes them.
+               */
+              function operationsOf(
+                pattern: any,
+                service: any
+              ): Map<string, any> {
+                const served = new Map<string, any>()
+                for (const endpoint of service?.endpoints ?? []) {
+                  const operation = pattern.operationOf(endpoint)
+                  if (operation === 'unknown' || served.has(operation)) continue
+                  served.set(operation, endpoint)
+                }
+                return served
+              }
+
+              /** The names of the parameters of a route (`:id` gives `id`). */
+              function paramsOf(route: string): string[] {
+                return [...String(route ?? '').matchAll(/:(\w+)/g)]
+                  .map((m: any) => m[1])
+              }
+
+              /**
+               * How a page component reaches a service: the name of its field,
+               * its class and the file of the class.
+               */
+              function serviceRefOf(pattern: any, service: any): any {
+                return {
+                  field: pattern.camelOf(service.name),
+                  type: `${pattern.pascalOf(service.name)}Service`,
+                  file: `../api/${pattern.kebabOf(service.name)}.service`
+                }
+              }
+
+              /**
+               * What every rendering reads: the component, its page and frontend,
+               * its child and its kind, the service of the resource and the
+               * operations it serves, the payload type and the fields of the page
+               * that the payload carries.
+               */
+              function contextOf(pattern: any, component: any, page: any): any {
+                const frontend: any = component.frontend ?? page.frontend
+                const child = (component.children ?? [])
+                  .find((c: any) => kindOf(c) !== undefined)
+                const payload: any = child?.payload
+                const resource: any = page.resource ?? payload?.resource
+                const service = pattern.apiClientOf(frontend, resource)
+                const carried = new Map<string, any>((payload?.fields ?? [])
+                  .map((f: any) => [pattern.camelOf(f.name), f]))
+                const name = pattern.pascalOf(component.name)
+                const fields = (page.fields ?? []).filter((field: any) => {
+                  if (carried.has(pattern.camelOf(field.name))) return true
+                  log.warning(`${name}: ${field.name} is not in the payload`)
+                  return false
+                })
+                return {
+                  pattern, component, page, frontend, child, payload, resource,
+                  service, fields, carried, name,
+                  kebab: pattern.kebabOf(component.name),
+                  kind: kindOf(child),
+                  ops: operationsOf(pattern, service),
+                  ref: service ? serviceRefOf(pattern, service) : undefined,
+                  type: payload ? pattern.pascalOf(payload.name) : undefined,
+                  typeFile: resource ? pattern.pascalOf(resource.name) : undefined,
+                  params: paramsOf(page.route)
+                }
+              }
+
+              /**
+               * A text in an Angular template: each character the template, HTML
+               * or the template literal reads written as a character reference.
+               */
+              function htmlText(text: string): string {
+                return String(text ?? '').replace(/[&<>"{}@`$\\]/g,
+                  (c: string) => `&#${c.charCodeAt(0)};`)
+              }
+
+              /** The title of the page, as a template text. */
+              function titleOf(ctx: any): string {
+                return htmlText(ctx.page.title ?? ctx.page.name)
+              }
+
+              /**
+               * The router commands of a route: its segments, a parameter given by
+               * `valueOf` (`/commandes/:id/edit` and `item.id` give
+               * `['/commandes', item.id, 'edit']`).
+               */
+              function commandsOf(
+                route: string,
+                valueOf: (p: string) => string
+              ): string {
+                const segments = String(route ?? '').split('/').filter(Boolean)
+                const commands = segments.map((segment: string, i: number) => {
+                  if (segment.startsWith(':')) return valueOf(segment.slice(1))
+                  return `'${i === 0 ? '/' : ''}${segment}'`
+                })
+                if (segments.length === 0 || segments[0].startsWith(':')) {
+                  commands.unshift("'/'")
+                }
+                return `[${commands.join(', ')}]`
+              }
+
+              /** The router link of an anchor: a path, or bound commands. */
+              function linkOf(
+                route: string,
+                valueOf: (p: string) => string
+              ): string {
+                if (paramsOf(route).length === 0) {
+                  return `routerLink="${htmlText(route)}"`
+                }
+                return `[routerLink]="${commandsOf(route, valueOf)}"`
+              }
+
+              /** The pages of the frontend for the resource of a context. */
+              function siblingsOf(ctx: any, kind: string): any[] {
+                const pages: any[] = ctx.frontend?.pages ?? []
+                return pages.filter((page: any) =>
+                  page.kind === kind && page.resource === ctx.resource)
+              }
+
+              /** The creation page: a form with no parameter. */
+              function creationOf(ctx: any): any {
+                return siblingsOf(ctx, 'form')
+                  .find((page: any) => paramsOf(page.route).length === 0)
+              }
+
+              /**
+               * The lines of the file: the imports, what the component uses, the
+               * decorator with the inline template, then the class.
+               */
+              function fileLines(ctx: any, parts: any): string[] {
+                const uses: string[] = parts.uses ?? []
+                const before: string[] = parts.before ?? []
+                return [
+                  ...parts.imports,
+                  ...(before.length > 0 ? ['', ...before] : []),
+                  '',
+                  '@Component({',
+                  `  selector: 'app-${ctx.kebab}',`,
+                  ...(uses.length > 0 ? [`  imports: [${uses.join(', ')}],`] : []),
+                  '  template: `',
+                  ...parts.template.map((line: string) => `    ${line}`),
+                  '  `',
+                  '})',
+                  `export class ${ctx.name}Component {`,
+                  ...(parts.members ?? []),
+                  '}'
+                ]
+              }
+
+              /** The parts of a page that cannot work, with a warning. */
+              function notAvailable(ctx: any, why: string): any {
+                log.warning(`${ctx.name}: ${why}, the page is not available`)
+                return {
+                  imports: ["import { Component } from '@angular/core'"],
+                  template: [
+                    '<section>',
+                    `  <h1>${titleOf(ctx)}</h1>`,
+                    '  <p>Not available</p>',
+                    '</section>'
+                  ]
+                }
+              }
+
+              /**
+               * The import lines of a page: `[module, names]` pairs, each name
+               * once, a pair without name left out. A module whose names are all
+               * types is imported with `import type`.
+               */
+              function importLines(
+                modules: any[],
+                types: any[] = []
+              ): string[] {
+                const line = (keyword: string) => ([from, names]: any) => {
+                  const once = names
+                    .filter((n: string, i: number) => names.indexOf(n) === i)
+                  return `${keyword} { ${once.join(', ')} } from '${from}'`
+                }
+                return [
+                  ...modules.filter(([, names]: any) => names.length > 0)
+                    .map(line('import')),
+                  ...types.filter(([, names]: any) => names.length > 0)
+                    .map(line('import type'))
+                ]
+              }
+
+              /** Each service once, in the order given. */
+              function uniqueRefs(refs: any[]): any[] {
+                return refs.filter((ref: any, i: number) =>
+                  refs.findIndex((r: any) => r.type === ref.type) === i)
+              }
+
+              /** The import of each service once, in the order given. */
+              function serviceImports(refs: any[]): any[] {
+                return uniqueRefs(refs).map((ref: any) => [ref.file, [ref.type]])
+              }
+
+              /** The field that injects a service. */
+              function injectLine(ref: any): string {
+                return `  private readonly ${ref.field} = inject(${ref.type})`
+              }
+
+              /** The fields of the parameters of the route of the page. */
+              function paramLines(ctx: any): string[] {
+                return ctx.params.flatMap((p: string) => [
+                  `  protected readonly ${p} =`,
+                  `    this.route.snapshot.paramMap.get('${p}') ?? ''`
+                ])
+              }
+
+              /**
+               * The error the API sent: its signal, its banner above the content,
+               * the method that sets it, and the function that writes its
+               * message — its status and its body, as the React client shows it.
+               */
+              const ERROR_SIGNAL =
+                '  protected readonly error = signal<string | undefined>(undefined)'
+              const ERROR_BANNER = [
+                '  @if (error()) {',
+                '    <p class="error">{{ error() }}</p>',
+                '  }'
+              ]
+              const FAIL = [
+                '',
+                '  private fail(error: HttpErrorResponse): void {',
+                '    this.error.set(messageOf(error))',
+                '  }'
+              ]
+              const MESSAGE_OF = [
+                'function messageOf(error: HttpErrorResponse): string {',
+                '  if (!error.status) return error.message',
+                "  const body = typeof error.error === 'string'",
+                '    ? error.error',
+                '    : JSON.stringify(error.error)',
+                '  return `${error.status} ${error.statusText}: ${body}`',
+                '}'
+              ]
+
+              /** The lines that call the API and handle its answer. */
+              function callLines(
+                call: string,
+                next: string,
+                indent = 4
+              ): string[] {
+                const pad = ' '.repeat(indent)
+                return [
+                  `${pad}${call}.subscribe({`,
+                  ...(next ? [`${pad}  next: ${next},`] : []),
+                  `${pad}  error: (error: HttpErrorResponse) => this.fail(error)`,
+                  `${pad}})`
+                ]
+              }
+
+              /** Whether a field of the payload may be missing. */
+              function nullableOf(ctx: any, field: any): boolean {
+                const carried = ctx.carried.get(ctx.pattern.camelOf(field.name))
+                return !carried?.mandatory
+              }
+
+              /**
+               * The value of a field of `item` as a template expression: a date as
+               * its day, a boolean as Yes or No, the values of a multiple field
+               * joined. `nullable` tells whether it can be missing.
+               */
+              function expressionOf(ctx: any, field: any, item: string): any {
+                const name = `${item}.${ctx.pattern.camelOf(field.name)}`
+                const nullable = nullableOf(ctx, field)
+                if (field.multiple) {
+                  const all = nullable ? `(${name} ?? [])` : name
+                  return { text: `${all}.join(', ')`, nullable: false }
+                }
+                if (field.widget === 'checkbox' || field.type?.name === 'Boolean') {
+                  return { text: `${name} ? 'Yes' : 'No'`, nullable: false }
+                }
+                if (field.widget === 'date' || field.type?.name === 'Date') {
+                  const day = `${name}${nullable ? '?.' : '.'}slice(0, 10)`
+                  return { text: day, nullable }
+                }
+                return { text: name, nullable }
+              }
+
+              /** The parts of a list page (a Table). */
+              function tableOf(ctx: any): any {
+                if (!ctx.service) return notAvailable(ctx, 'no service')
+                if (!ctx.ops.has('list')) return notAvailable(ctx, 'no list')
+                const { pattern, fields, ref } = ctx
+                const creation = creationOf(ctx)
+                const rowLink: any = ctx.child.rowLink
+                const key = (ctx.payload.fields ?? [])
+                  .some((f: any) => pattern.camelOf(f.name) === 'id')
+                const links = !!creation || !!rowLink?.route
+                return {
+                  imports: importLines([
+                    ['@angular/common/http', ['HttpErrorResponse']],
+                    ['@angular/core', ['Component', 'inject', 'signal']],
+                    ['@angular/router', links ? ['RouterLink'] : []],
+                    ...serviceImports([ref])
+                  ], [[`../types/${ctx.typeFile}`, [ctx.type]]]),
+                  before: MESSAGE_OF,
+                  uses: links ? ['RouterLink'] : [],
+                  template: [
+                    '<section>',
+                    `  <h1>${titleOf(ctx)}</h1>`,
+                    ...(creation
+                      ? [`  <a ${linkOf(creation.route, () => '')}>New</a>`]
+                      : []),
+                    ...ERROR_BANNER,
+                    '  <table>',
+                    '    <thead>',
+                    '      <tr>',
+                    ...fields.map((f: any) =>
+                      `        <th>${htmlText(f.label ?? f.name)}</th>`),
+                    '      </tr>',
+                    '    </thead>',
+                    '    <tbody>',
+                    `      @for (item of items(); track ${key ? 'item.id' : '$index'}) {`,
+                    '        <tr>',
+                    ...fields.map((f: any, i: number) =>
+                      cellLine(ctx, f, i === 0 ? rowLink : undefined)),
+                    '        </tr>',
+                    '      }',
+                    '    </tbody>',
+                    '  </table>',
+                    '</section>'
+                  ],
+                  members: [
+                    injectLine(ref),
+                    `  protected readonly items = signal<${ctx.type}[]>([])`,
+                    ERROR_SIGNAL,
+                    '',
+                    '  constructor() {',
+                    ...callLines(`this.${ref.field}.list()`,
+                      '(items) => this.items.set(items)'),
+                    '  }',
+                    ...FAIL
+                  ]
+                }
+              }
+
+              /**
+               * The line of a cell. The first one links to the row page, and
+               * shows a dash for a missing value so that the link stays visible.
+               */
+              function cellLine(ctx: any, field: any, rowLink: any): string {
+                const value = expressionOf(ctx, field, 'item')
+                if (!rowLink?.route) return `          <td>{{ ${value.text} }}</td>`
+                const shown = value.nullable ? `${value.text} ?? '—'` : value.text
+                const to = linkOf(rowLink.route, (p: string) =>
+                  `item.${ctx.pattern.camelOf(p)}`)
+                return `          <td><a ${to}>{{ ${shown} }}</a></td>`
+              }
+
+              /**
+               * The links of a detail page to its linked pages, labelled by their
+               * kind: List, Detail, Edit (a form with a parameter) or New.
+               */
+              function linkLines(ctx: any): string[] {
+                const links: any[] = ctx.page.links ?? []
+                return links.flatMap((page: any) => {
+                  const missing = paramsOf(page.route)
+                    .filter((p: string) => !ctx.params.includes(p))
+                  if (missing.length > 0) {
+                    log.warning(`${ctx.name}: no ${missing[0]} for ${page.name}`)
+                    return []
+                  }
+                  const label = page.kind === 'list' ? 'List'
+                    : page.kind === 'detail' ? 'Detail'
+                    : paramsOf(page.route).length > 0 ? 'Edit' : 'New'
+                  return [`    <a ${linkOf(page.route, (p: string) => p)}>${label}</a>`]
+                })
+              }
+
+              /** The parts of a detail page (a Detail). */
+              function detailOf(ctx: any): any {
+                if (!ctx.service) return notAvailable(ctx, 'no service')
+                if (!ctx.ops.has('get')) return notAvailable(ctx, 'no get')
+                if (ctx.params.length === 0) {
+                  return notAvailable(ctx, 'no identifier in the route')
+                }
+                const { ref } = ctx
+                const canDelete = ctx.ops.has('delete')
+                const list = siblingsOf(ctx, 'list')[0]
+                const back = list ? commandsOf(list.route, (p) => `this.${p}`) : "['/']"
+                const args = ctx.params.map((p: string) => `this.${p}`).join(', ')
+                const links = linkLines(ctx)
+                const router = ['ActivatedRoute',
+                  ...(links.length > 0 ? ['RouterLink'] : []),
+                  ...(canDelete ? ['Router'] : [])]
+                return {
+                  imports: importLines([
+                    ['@angular/common/http', ['HttpErrorResponse']],
+                    ['@angular/core', ['Component', 'inject', 'signal']],
+                    ['@angular/router', router.sort()],
+                    ...serviceImports([ref])
+                  ], [[`../types/${ctx.typeFile}`, [ctx.type]]]),
+                  before: MESSAGE_OF,
+                  uses: links.length > 0 ? ['RouterLink'] : [],
+                  template: [
+                    '<section>',
+                    `  <h1>${titleOf(ctx)}</h1>`,
+                    ...ERROR_BANNER,
+                    '  @if (item(); as item) {',
+                    '    <dl>',
+                    ...ctx.fields.flatMap((f: any) => [
+                      `      <dt>${htmlText(f.label ?? f.name)}</dt>`,
+                      `      <dd>{{ ${expressionOf(ctx, f, 'item').text} }}</dd>`
+                    ]),
+                    '    </dl>',
+                    '  }',
+                    '  <p>',
+                    ...links,
+                    ...(canDelete ? [
+                      '    <button type="button" (click)="remove()">',
+                      '      Delete',
+                      '    </button>'
+                    ] : []),
+                    '  </p>',
+                    '</section>'
+                  ],
+                  members: [
+                    '  private readonly route = inject(ActivatedRoute)',
+                    ...(canDelete ? ['  private readonly router = inject(Router)'] : []),
+                    injectLine(ref),
+                    ...paramLines(ctx),
+                    `  protected readonly item = signal<${ctx.type} | undefined>(undefined)`,
+                    ERROR_SIGNAL,
+                    '',
+                    '  constructor() {',
+                    ...callLines(`this.${ref.field}.get(${args})`,
+                      '(item) => this.item.set(item)'),
+                    '  }',
+                    ...(canDelete ? [
+                      '',
+                      '  protected remove(): void {',
+                      ...callLines(`this.${ref.field}.remove(${args})`,
+                        `() => void this.router.navigate(${back})`),
+                      '  }'
+                    ] : []),
+                    ...FAIL
+                  ]
+                }
+              }
+
+              /**
+               * How a field of a form is held and controlled: `checkbox` (a
+               * boolean), `options` (a list of the elements of the resource of a
+               * relation field), `enum` (the values of an Enum), `lines` (a
+               * multiple field in a text area), `number` (a number input, its
+               * value a number or null) or `input` (a text or a date).
+               */
+              function controlOf(ctx: any, field: any): any {
+                const { pattern } = ctx
+                const type: any = field.type
+                const values = Array.isArray(type?.values) ? type.values : undefined
+                if (field.widget === 'checkbox') return { kind: 'checkbox' }
+                if (field.widget === 'select' && values) {
+                  return { kind: 'enum', values }
+                }
+                if (field.widget === 'select' && field.resource) {
+                  const service = pattern.apiClientOf(ctx.frontend, field.resource)
+                  const list = operationsOf(pattern, service).get('list')
+                  if (service && list?.response) {
+                    return optionsOf(ctx, field, service, list.response)
+                  }
+                  log.warning(`${ctx.name}: no list for ${field.name}, a text input`)
+                }
+                if (field.multiple) return { kind: 'lines' }
+                if (type?.name === 'Number') return { kind: 'number' }
+                return { kind: 'input' }
+              }
+
+              /**
+               * The control of a relation field: the service that lists the
+               * elements of its resource, their type, the signal that holds them,
+               * and the expression that labels one (rule 12).
+               */
+              function optionsOf(
+                ctx: any,
+                field: any,
+                service: any,
+                item: any
+              ): any {
+                const { pattern } = ctx
+                const label = pattern.labelFieldOf(ctx.frontend, field.resource)
+                const labelField = (item.fields ?? [])
+                  .find((f: any) => pattern.camelOf(f.name) === label)
+                const sure = label === 'id' || !!labelField?.mandatory
+                return {
+                  kind: 'options',
+                  ref: serviceRefOf(pattern, service),
+                  type: pattern.pascalOf(item.name),
+                  typeFile: pattern.pascalOf(field.resource.name),
+                  label: sure ? `option.${label}` : `option.${label} ?? option.id`,
+                  state: pattern.camelOf(`${field.name} options`)
+                }
+              }
+
+              /** The TypeScript type of the form value of a field. */
+              function valueTypeOf(field: any, control: any): string {
+                if (control.kind === 'checkbox') return 'boolean'
+                if (control.kind === 'options' && field.multiple) return 'string[]'
+                if (control.kind === 'number') return 'number | null'
+                return 'string'
+              }
+
+              /** The empty form value of a field. */
+              function emptyOf(field: any, control: any): string {
+                if (control.kind === 'checkbox') return 'false'
+                if (control.kind === 'options' && field.multiple) return '[]'
+                if (control.kind === 'number') return 'null'
+                return "''"
+              }
+
+              /** The form value of a field read from an element of the API. */
+              function fromItem(ctx: any, field: any, control: any): string {
+                const name = `item.${ctx.pattern.camelOf(field.name)}`
+                if (control.kind === 'checkbox') return `Boolean(${name})`
+                if (control.kind === 'options' && field.multiple) {
+                  return `(${name} ?? []).map(String)`
+                }
+                if (control.kind === 'lines') return `(${name} ?? []).join('\\n')`
+                if (control.kind === 'number') return `${name} ?? null`
+                if (field.type?.name === 'Date') return `(${name} ?? '').slice(0, 10)`
+                return `String(${name} ?? '')`
+              }
+
+              /**
+               * The value sent to the API for a field: a number, a date at
+               * midnight UTC, an array, nothing for an empty optional value.
+               */
+              function toInput(ctx: any, field: any, control: any): string {
+                const v = `values.${ctx.pattern.camelOf(field.name)}`
+                const number = field.type?.name === 'Number'
+                const cast = control.kind === 'enum'
+                  ? ` as ${ctx.type}['${ctx.pattern.camelOf(field.name)}']`
+                  : ''
+                if (control.kind === 'checkbox') return v
+                if (field.multiple) {
+                  const all = control.kind === 'options' ? v
+                    : `${v}.split('\\n').map((s) => s.trim()).filter(Boolean)`
+                  return `${all}${number ? '.map(Number)' : ''}${cast}`
+                }
+                if (control.kind === 'number') {
+                  return field.mandatory ? `Number(${v})` : `${v} ?? undefined`
+                }
+                const one = field.type?.name === 'Date'
+                  ? `\`\${${v}}T00:00:00.000Z\``
+                  : v
+                return field.mandatory
+                  ? `${one}${cast}`
+                  : `${v} === '' ? undefined : ${one}${cast}`
+              }
+
+              /** The lines of an element: its attributes one per line. */
+              function tagLines(
+                tag: string,
+                attributes: string[],
+                end: string
+              ): string[] {
+                return [
+                  `      <${tag}`,
+                  ...attributes.map((a: string) => `        ${a}`),
+                  `      ${end}`
+                ]
+              }
+
+              /**
+               * The attributes that bind a control to the value of its field:
+               * its name, the model and its change, `required` when it must.
+               */
+              function boundOf(name: string, required: boolean): string[] {
+                return [
+                  `name="${name}"`,
+                  `[ngModel]="values().${name}"`,
+                  `(ngModelChange)="change('${name}', $event)"`,
+                  ...(required ? ['required'] : [])
+                ]
+              }
+
+              /** The lines of the control of a field, in its label (rule 9). */
+              function controlLines(
+                ctx: any,
+                field: any,
+                control: any
+              ): string[] {
+                const name = ctx.pattern.camelOf(field.name)
+                const label = htmlText(field.label ?? field.name)
+                const required = !!field.mandatory && control.kind !== 'checkbox'
+                const bound = boundOf(name, required)
+                const type = control.kind === 'number' ? 'number'
+                  : field.widget === 'date' || field.type?.name === 'Date' ? 'date'
+                  : 'text'
+                const body = control.kind === 'checkbox'
+                  ? tagLines('input', ['type="checkbox"', ...bound], '/>')
+                  : control.kind === 'lines' || field.widget === 'textarea'
+                  ? tagLines('textarea', bound, '></textarea>')
+                  : control.kind === 'enum' ? enumLines(control, bound)
+                  : control.kind === 'options' ? optionLines(field, control, bound)
+                  : tagLines('input', [`type="${type}"`,
+                      ...(type === 'number' ? ['step="any"'] : []), ...bound], '/>')
+                return ['    <label>', `      ${label}`, ...body, '    </label>']
+              }
+
+              /** The lines of a list of the values of an Enum. */
+              function enumLines(control: any, bound: string[]): string[] {
+                return [
+                  ...tagLines('select', bound, '>'),
+                  '        <option value="">—</option>',
+                  ...control.values.map((value: string) =>
+                    `        <option value="${htmlText(value)}">` +
+                    `${htmlText(value)}</option>`),
+                  '      </select>'
+                ]
+              }
+
+              /** The lines of a list of the elements of a relation. */
+              function optionLines(
+                field: any,
+                control: any,
+                bound: string[]
+              ): string[] {
+                return [
+                  ...tagLines('select', [...(field.multiple ? ['multiple'] : []),
+                    ...bound], '>'),
+                  ...(field.multiple ? [] : ['        <option value="">—</option>']),
+                  `        @for (option of ${control.state}(); track option.id) {`,
+                  '          <option [value]="option.id">',
+                  `            {{ ${control.label} }}`,
+                  '          </option>',
+                  '        }',
+                  '      </select>'
+                ]
+              }
+
+              /** The parts of a form page (a Form). */
+              function formOf(ctx: any): any {
+                if (!ctx.service) return notAvailable(ctx, 'no service')
+                const { pattern, ref } = ctx
+                const operation = pattern.operationOf(ctx.child.endpoint)
+                if (operation !== 'create' && operation !== 'update') {
+                  return notAvailable(ctx, `a ${operation} endpoint`)
+                }
+                if (!ctx.ops.has(operation)) {
+                  return notAvailable(ctx, `no ${operation}`)
+                }
+                if (operation === 'update' && ctx.params.length === 0) {
+                  return notAvailable(ctx, 'no identifier for update')
+                }
+                const reads = ctx.params.length > 0 && ctx.ops.has('get')
+                if (ctx.params.length > 0 && !reads) {
+                  log.warning(`${ctx.name}: no get, the form starts empty`)
+                }
+                const controls = ctx.fields.map((f: any) => controlOf(ctx, f))
+                const options = controls
+                  .filter((c: any) => c.kind === 'options')
+                  .filter((c: any, i: number, all: any[]) =>
+                    all.findIndex((o: any) => o.state === c.state) === i)
+                const item = reads ? ctx.ops.get('get').response : undefined
+                const itemType = item ? pattern.pascalOf(item.name) : undefined
+                const types = new Map<string, string[]>([[ctx.typeFile, [ctx.type]]])
+                if (itemType) types.get(ctx.typeFile)!.push(itemType)
+                for (const o of options) {
+                  types.set(o.typeFile, [...(types.get(o.typeFile) ?? []), o.type])
+                }
+                const refs = [ref, ...options.map((o: any) => o.ref)]
+                const after = afterOf(ctx, ctx.ops.get(operation))
+                const router = [
+                  ...(ctx.params.length > 0 ? ['ActivatedRoute'] : []),
+                  ...(after ? ['Router'] : [])]
+                return {
+                  imports: importLines([
+                    ['@angular/common/http', ['HttpErrorResponse']],
+                    ['@angular/core', ['Component', 'inject', 'signal']],
+                    ['@angular/forms', ['FormsModule']],
+                    ['@angular/router', router],
+                    ...serviceImports(refs)
+                  ], [...types]
+                    .map(([file, names]: any) => [`../types/${file}`, names])),
+                  before: [
+                    ...valuesLines(ctx, controls, itemType),
+                    '',
+                    ...MESSAGE_OF
+                  ],
+                  uses: ['FormsModule'],
+                  template: [
+                    '<section>',
+                    `  <h1>${titleOf(ctx)}</h1>`,
+                    ...ERROR_BANNER,
+                    '  <form ngNativeValidate (ngSubmit)="submit()">',
+                    ...ctx.fields.flatMap((f: any, i: number) =>
+                      controlLines(ctx, f, controls[i])),
+                    '    <button type="submit">Save</button>',
+                    '  </form>',
+                    '</section>'
+                  ],
+                  members: [
+                    ...(ctx.params.length > 0
+                      ? ['  private readonly route = inject(ActivatedRoute)']
+                      : []),
+                    ...(after ? ['  private readonly router = inject(Router)'] : []),
+                    ...uniqueRefs(refs).map(injectLine),
+                    ...paramLines(ctx),
+                    '  protected readonly values = signal<Values>(EMPTY)',
+                    ...options.map((o: any) =>
+                      `  protected readonly ${o.state} = signal<${o.type}[]>([])`),
+                    ERROR_SIGNAL,
+                    '',
+                    '  constructor() {',
+                    ...options.flatMap((o: any) =>
+                      callLines(`this.${o.ref.field}.list()`,
+                        `(items) => this.${o.state}.set(items)`)),
+                    ...(reads ? callLines(
+                      `this.${ref.field}.get(${argsOf(ctx)})`,
+                      '(item) => this.values.set(valuesOf(item))') : []),
+                    '  }',
+                    '',
+                    '  protected change<K extends keyof Values>(',
+                    '    name: K,',
+                    '    value: Values[K]',
+                    '  ): void {',
+                    '    this.values.update((current) => ({ ...current, [name]: value }))',
+                    '  }',
+                    '',
+                    '  protected submit(): void {',
+                    ...callLines(sendOf(ctx, operation), after ?? ''),
+                    '  }',
+                    ...FAIL
+                  ]
+                }
+              }
+
+              /** The arguments of the route of the page, as fields. */
+              function argsOf(ctx: any): string {
+                return ctx.params.map((p: string) => `this.${p}`).join(', ')
+              }
+
+              /**
+               * The declarations of a form before its component: the type of its
+               * values, the empty values, the values of an element read from the
+               * API, and the input sent from the values.
+               */
+              function valuesLines(
+                ctx: any,
+                controls: any[],
+                itemType: any
+              ): string[] {
+                const { pattern, fields } = ctx
+                const each = (write: (f: any, c: any) => string, pad: string) =>
+                  fields.map((f: any, i: number) =>
+                    `${pad}${pattern.camelOf(f.name)}: ${write(f, controls[i])}`)
+                return [
+                  'interface Values {',
+                  ...each(valueTypeOf, '  '),
+                  '}',
+                  '',
+                  'const EMPTY: Values = {',
+                  ...withCommas(each(emptyOf, '  ')),
+                  '}',
+                  ...(itemType ? [
+                    '',
+                    `function valuesOf(item: ${itemType}): Values {`,
+                    '  return {',
+                    ...withCommas(each((f, c) => fromItem(ctx, f, c), '    ')),
+                    '  }',
+                    '}'
+                  ] : []),
+                  '',
+                  `function inputOf(values: Values): ${ctx.type} {`,
+                  '  return {',
+                  ...withCommas(each((f, c) => toInput(ctx, f, c), '    ')),
+                  '  }',
+                  '}'
+                ]
+              }
+
+              /** The lines of an object: a comma after each but the last. */
+              function withCommas(lines: string[]): string[] {
+                return lines.map((line: string, i: number) =>
+                  i < lines.length - 1 ? `${line},` : line)
+              }
+
+              /**
+               * Where a sent form goes, as the `next` of its call: the detail
+               * page of the resource with the identifier of the element sent
+               * back, else its list page. None: undefined, with a warning.
+               */
+              function afterOf(ctx: any, sent: any): string | undefined {
+                const detail = siblingsOf(ctx, 'detail')[0]
+                const list = siblingsOf(ctx, 'list')[0]
+                const target = detail ?? list
+                if (!target) {
+                  log.warning(`${ctx.name}: no detail or list page to go to`)
+                  return undefined
+                }
+                const fromResponse = !!sent?.response
+                const commands = commandsOf(target.route, (p: string) =>
+                  fromResponse ? `item.${ctx.pattern.camelOf(p)}` : `this.${p}`)
+                const item = fromResponse ? '(item)' : '()'
+                return `${item} => void this.router.navigate(${commands})`
+              }
+
+              /** The call that sends the form by `create` or `update`. */
+              function sendOf(ctx: any, operation: string): string {
+                const field = ctx.ref.field
+                if (operation === 'create') {
+                  return `this.${field}.create(inputOf(this.values()))`
+                }
+                const args = `${argsOf(ctx)}, inputOf(this.values())`
+                return `this.${field}.update(${args})`
+              }
+      - name: angularToCode
+        instanceOf: SpringAngularToCode:angular.FrontendToProject
+        source: Angular:Frontend
+        target: FileSystem:SystemFolder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: serviceToFile
+        instanceOf: SpringAngularToCode:angular.ServiceToFile
+        source: Angular:Service
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: layoutToFile
+        instanceOf: SpringAngularToCode:angular.LayoutToFile
+        source: Application:spa.Layout
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: pageComponentToFile
+        instanceOf: SpringAngularToCode:angular.PageComponentToFile
+        source: Application:spa.PageComponent
+        target: FileSystem:Folder
+        outputRelation: FileSystem:EntryContainer.entries
+      - name: SpringAngularToProject
+        instanceOf: Core:Class
+        icon: mui:Layers
+        extends:
+          - ApplicationToCode:code.CodePattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Spring:boot.Context
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: FileSystem:Entry
+            code: |
+              import { Folder, MarkdownFile, TextFile } from 'FileSystem'
+              import { angularToCode } from 'SpringAngularToCode/angular'
+              import { springToCode } from 'SpringAngularToCode/spring'
+
+              /**
+               * SpringAngularToProject — the stack pattern for Spring Boot +
+               * Angular (rule 13, Q1). Branched on a Spring context, it writes a
+               * single project in a system folder: a root (`README.md`,
+               * `.gitignore`, the `docker-compose.yml` of the MariaDB database),
+               * the server project under `server/` (ContextToProject, as is) and
+               * the client project of the Angular frontend of the same application
+               * under `client/` (FrontendToProject). No root package: each project
+               * runs as an ordinary project of its stack. The folder stands alone
+               * as a repository once copied.
+               */
+              export default function (source) {
+                const context: any = source
+                if (!context.application) {
+                  throw new Error(`${context.name}: the context has no application`)
+                }
+                const frontend = frontendOf(context)
+                const db = databaseNameOf(this, context)
+                const textFile = (
+                  name: string,
+                  ext: string,
+                  fileType: string,
+                  lines: string[]
+                ) => new TextFile({
+                  name: this.fileNameOf(name, ext),
+                  fileType,
+                  text: this.textOf(lines)
+                })
+                return [
+                  new MarkdownFile({
+                    name: this.fileNameOf('README', 'md'),
+                    text: this.textOf(readmeOf(context, frontend, db))
+                  }),
+                  textFile('', 'gitignore', 'plaintext',
+                    ['target', 'node_modules', 'dist', '.angular']),
+                  textFile('docker-compose', 'yml', 'yaml', composeOf(db)),
+                  new Folder({
+                    name: 'server',
+                    entries: mapAll(context, springToCode)
+                  }),
+                  ...(frontend
+                    ? [new Folder({
+                        name: 'client',
+                        entries: mapAll(frontend, angularToCode)
+                      })]
+                    : [])
+                ]
+              }
+
+              /**
+               * The Angular frontend of the application of the context: the first
+               * one, with a warning when there are several or none.
+               */
+              function frontendOf(context: any): any {
+                const frontends: any[] = (context.application.frontends ?? [])
+                  .filter((f: any) => f.instanceOf?._inherits(e('Angular:Frontend')))
+                const app = context.application.name
+                if (frontends.length === 0) {
+                  log.warning(`${context.name}: no Angular frontend in ${app}`)
+                  return undefined
+                }
+                if (frontends.length > 1) {
+                  const n = frontends.length
+                  const first = frontends[0].name
+                  log.warning(`${context.name}: ${n} Angular frontends, using ${first}`)
+                }
+                return frontends[0]
+              }
+
+              /**
+               * The name of the database the server connects to, as
+               * ContextToProject writes it in `application.properties`: the first
+               * SQL database of the application, else the context in kebab-case.
+               */
+              function databaseNameOf(pattern: any, context: any): string {
+                const stores: any[] = context.application.stores ?? []
+                const database = stores.find((store: any) =>
+                  store.instanceOf?._path?.() === 'Application:sql.Database')
+                return database ? database.name : pattern.kebabOf(context.name)
+              }
+
+              /**
+               * The lines of `docker-compose.yml`: MariaDB 11 on port 3306, the
+               * database of the model, root without password as
+               * `application.properties` expects, no volume — `docker compose down`
+               * gives an empty database again.
+               */
+              function composeOf(db: string): string[] {
+                return [
+                  'services:',
+                  '  mariadb:',
+                  '    image: mariadb:11',
+                  '    environment:',
+                  `      MARIADB_DATABASE: ${db}`,
+                  '      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"',
+                  '    ports:',
+                  '      - "3306:3306"'
+                ]
+              }
+
+              /** The lines of the root `README.md`: how to run the whole. */
+              function readmeOf(context: any, frontend: any, db: string) {
+                const app = context.application
+                const title = app.title || app.name
+                const from = frontend
+                  ? ` and the Angular frontend \`${frontend.name}\``
+                  : ''
+                return [
+                  `# ${title} — Spring Boot + Angular`,
+                  '',
+                  `Generated from the Spring context \`${context.name}\`${from}`,
+                  `of the application \`${app.name}\`. Regenerated at each change`,
+                  'of the model: edit the model, not these files.',
+                  '',
+                  '- `server/` — the API: Spring Boot + JPA + MariaDB, built by Maven.',
+                  ...(frontend
+                    ? ['- `client/` — the user interface: Angular.']
+                    : []),
+                  '- `docker-compose.yml` — the MariaDB database.',
+                  '',
+                  '## Prerequisites',
+                  '',
+                  frontend
+                    ? 'Java 17+, Maven 3.9, Docker with Compose, and Node 22.22.3+ or 24.15+.'
+                    : 'Java 17+, Maven 3.9 and Docker with Compose.',
+                  '',
+                  '## Run',
+                  '',
+                  '1. `docker compose up -d` — MariaDB listens on',
+                  `   \`localhost:3306\` with an empty database \`${db}\`.`,
+                  '2. In `server/`: `mvn spring-boot:run` — the API listens on',
+                  '   `http://localhost:8080` and creates the tables at start. A',
+                  '   database just started may refuse the first connection: wait',
+                  '   a few seconds and run it again.',
+                  ...(frontend ? [
+                    '3. In `client/`: `npm install` then `npm start` — the client',
+                    '   opens on `http://localhost:4200` and calls the API through',
+                    '   the dev server of Angular.'
+                  ] : []),
+                  '',
+                  '`docker compose down` stops the database and removes it with its',
+                  'data. After a field is added to the model, it is how the tables',
+                  'are created again: `docker compose down` then',
+                  '`docker compose up -d`.'
+                ]
+              }
+      - name: springAngularToCode
+        instanceOf: SpringAngularToCode:angular.SpringAngularToProject
+        source: Spring:boot.Context
+        target: FileSystem:SystemFolder
+        outputRelation: FileSystem:EntryContainer.entries
+  - name: CodePatternsClassDiagram
+    instanceOf: Diagram:core.Diagram
+    type: Uml:ClassDiagram
+    subject: SpringAngularToCode
+    nodes:
+      - name: CodeCodePattern
+        instanceOf: Diagram:core.Node
+        element: ApplicationToCode:code.CodePattern
+        x: -100
+        'y': -480
+        width: 200
+        height: 312
+      - name: SpringSpringPattern
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.SpringPattern
+        x: 230
+        'y': -120
+        width: 200
+        height: 136
+      - name: SpringContextToProject
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.ContextToProject
+        x: -690
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringEntityToJavaFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.EntityToJavaFile
+        x: -460
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringControllerToDtos
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.ControllerToDtos
+        x: -230
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringRepositoryToJavaFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.RepositoryToJavaFile
+        x: 0
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringServiceToJavaFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.ServiceToJavaFile
+        x: 230
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringControllerToJavaFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.ControllerToJavaFile
+        x: 460
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringContextToSchema
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:spring.ContextToSchema
+        x: 690
+        'y': 60
+        width: 200
+        height: 56
+      - name: AngularFrontendToProject
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:angular.FrontendToProject
+        x: -575
+        'y': 200
+        width: 200
+        height: 56
+      - name: AngularServiceToFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:angular.ServiceToFile
+        x: -345
+        'y': 200
+        width: 200
+        height: 56
+      - name: AngularLayoutToFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:angular.LayoutToFile
+        x: -115
+        'y': 200
+        width: 200
+        height: 56
+      - name: AngularPageComponentToFile
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:angular.PageComponentToFile
+        x: 115
+        'y': 200
+        width: 200
+        height: 56
+      - name: AngularSpringAngularToProject
+        instanceOf: Diagram:core.Node
+        element: SpringAngularToCode:angular.SpringAngularToProject
+        x: 345
+        'y': 200
+        width: 200
+        height: 56
+version: latest
+depends:
+  - Mapping
+  - FileSystem
+  - Diagram
+  - Uml
+  - metaltura/application/Application@v1.0.0
+  - metaltura/application/ApplicationToCode@v1.0.0
+  - metaltura/spring/Spring@v1.0.0
+  - metaltura/angular/Angular@v1.0.0

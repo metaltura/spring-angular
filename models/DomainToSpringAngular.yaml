@@ -1,0 +1,827 @@
+name: DomainToSpringAngular
+instanceOf: Core:Model
+elements:
+  - name: sql
+    instanceOf: Core:Package
+    elements:
+      - name: EntityToTable
+        instanceOf: Core:Class
+        icon: mui:TableChart
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Application:sql.Table
+            code: |
+              import { Column, Table } from 'Application/sql'
+              import {
+                fieldToColumn,
+                relationToForeignKey
+              } from 'DomainToSpringAngular/sql'
+
+              /**
+               * EntityToTable — the SQL table of an entity (rules 11 to 13 and 17).
+               *
+               * The table is named after the entity and holds:
+               * - the key column `id`, CHAR(36), which holds a UUID (Q6);
+               * - one column per field of the entity and of its ancestors
+               *   (FieldToColumn);
+               * - for each single-valued relation, the column `<relation>Id` and its
+               *   foreign key `<relation>` (RelationToForeignKey);
+               * - `state` when the entity has a lifecycle.
+               *
+               * Left to the stack pattern, which knows every entity: the table each
+               * foreign key targets, the `<parent>Id` column and foreign key of a
+               * composition child (rule 15), the join tables (EntityToJoinTables) and
+               * the audit columns.
+               */
+              export default function (source) {
+                const text = e('Core:String')
+                const columns = this.fieldsOf(source).map((field: any) => map(field, fieldToColumn))
+
+                // A single-valued relation gives a column and its foreign key, in this
+                // order. A multi-valued one is a join table, or is carried by the other
+                // table (rules 14 to 16).
+                const links = this.referenceRelationsOf(source)
+                  .filter((relation: any) => !relation.multiple)
+                  .filter((relation: any) => this.canProduce(source, this.referenceFieldName(relation)))
+                  .map((relation: any) => mapAll(relation, relationToForeignKey))
+
+                // The key: the produced `id`, or the column of a domain field named `id`.
+                const produced = this.canProduce(source, 'id')
+                const id = produced
+                  ? new Column({ name: 'id', type: text, mandatory: true, sqlType: 'CHAR(36)' })
+                  : columns.find((column: any) => column.name === 'id')
+                const state = !!source.lifecycle && this.canProduce(source, 'state')
+                  ? [new Column({ name: 'state', type: text, mandatory: true, sqlType: 'VARCHAR(255)' })]
+                  : []
+
+                return new Table({
+                  name: source.name,
+                  fields: [
+                    ...(produced && id ? [id] : []),
+                    ...columns,
+                    ...links.map(([column]: any[]) => column),
+                    ...state
+                  ],
+                  references: links.map(([, foreignKey]: any[]) => foreignKey),
+                  ...(id ? { key: id } : {})
+                })
+              }
+      - name: FieldToColumn
+        instanceOf: Core:Class
+        icon: mui:ViewColumn
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Field
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Application:sql.Column
+            code: |
+              import { Column } from 'Application/sql'
+
+              /** The SQL type of each kind of field (rule 12). */
+              const SQL_TYPES: Record<string, string> = {
+                String: 'VARCHAR(255)',
+                Number: 'DOUBLE',
+                Boolean: 'BOOLEAN',
+                Date: 'TIMESTAMP',
+                enum: 'VARCHAR(50)',
+                multiple: 'JSON'
+              }
+
+              /**
+               * FieldToColumn — the column of a domain field (rule 12): the same name,
+               * type and flags, and the SQL type of its kind.
+               */
+              export default function (source) {
+                return new Column({
+                  name: source.name,
+                  type: source.type,
+                  ...(source.mandatory ? { mandatory: true } : {}),
+                  ...(source.multiple ? { multiple: true } : {}),
+                  sqlType: SQL_TYPES[this.kindOf(source)] ?? 'VARCHAR(255)'
+                })
+              }
+      - name: RelationToForeignKey
+        instanceOf: Core:Class
+        icon: mui:Link
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:EntityRelation
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: Core:Element
+            code: |
+              import { Column, ForeignKey } from 'Application/sql'
+
+              /**
+               * RelationToForeignKey — what a single-valued relation gives its table
+               * (rule 13), in this order:
+               * - the column `<relation>Id`, CHAR(36), mandatory when the relation is;
+               * - the foreign key `<relation>`, carried by that column.
+               *
+               * Left to the stack pattern, which knows every table: the table the foreign
+               * key targets.
+               */
+              export default function (source) {
+                if (source.multiple) {
+                  throw new Error(`${source.name}: a multi-valued relation has no foreign key in its table (rules 14 to 16)`)
+                }
+                const column = new Column({
+                  name: this.referenceFieldName(source),
+                  into: 'fields',
+                  type: e('Core:String'),
+                  ...(source.mandatory ? { mandatory: true } : {}),
+                  sqlType: 'CHAR(36)'
+                })
+                return [column, new ForeignKey({ name: source.name, into: 'references', column })]
+              }
+      - name: EntityToJoinTables
+        instanceOf: Core:Class
+        icon: mui:JoinInner
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: Application:sql.Table
+            code: |
+              import { Column, ForeignKey, Table } from 'Application/sql'
+
+              /**
+               * EntityToJoinTables — the join tables of an entity (rule 16): one per
+               * multi-valued relation that is neither a composition nor has a return,
+               * inherited ones included.
+               *
+               * The join table `<Entity>_<relation>` holds three columns, CHAR(36):
+               * - the key `id`, which the JPA entity of the join table needs as its
+               *   identifier (rule 33);
+               * - `<entity>Id` and the foreign key `<entity>`, towards the entity;
+               * - `<relation>Id` and the foreign key `<relation>`, towards the entity
+               *   the relation targets.
+               *
+               * Left to the stack pattern, which knows every table: the table each
+               * foreign key targets, in this order.
+               */
+              export default function (source) {
+                const text = e('Core:String')
+                const keyColumn = (name: string) =>
+                  new Column({ name, type: text, mandatory: true, sqlType: 'CHAR(36)' })
+
+                return this.referenceRelationsOf(source)
+                  .filter((relation: any) => relation.multiple)
+                  .map((relation: any) => {
+                    const id = keyColumn('id')
+                    const owner = keyColumn(`${this.referenceNameOf(source)}Id`)
+                    const other = keyColumn(`${relation.name}Id`)
+                    return new Table({
+                      name: `${source.name}_${relation.name}`,
+                      fields: [id, owner, other],
+                      references: [
+                        new ForeignKey({ name: this.referenceNameOf(source), column: owner }),
+                        new ForeignKey({ name: relation.name, column: other })
+                      ],
+                      key: id
+                    })
+                  })
+              }
+      - name: entityToTable
+        instanceOf: DomainToSpringAngular:sql.EntityToTable
+        source: Domain:Entity
+        target: Application:sql.Database
+        outputRelation: Application:data.Store.records
+      - name: fieldToColumn
+        instanceOf: DomainToSpringAngular:sql.FieldToColumn
+        source: Domain:Field
+        target: Application:sql.Table
+        outputRelation: Application:data.Record.fields
+      - name: relationToForeignKey
+        instanceOf: DomainToSpringAngular:sql.RelationToForeignKey
+        source: Domain:EntityRelation
+        target: Application:sql.Table
+      - name: entityToJoinTables
+        instanceOf: DomainToSpringAngular:sql.EntityToJoinTables
+        source: Domain:Entity
+        target: Application:sql.Database
+        outputRelation: Application:data.Store.records
+  - name: spring
+    instanceOf: Core:Package
+    elements:
+      - name: EntityToJpaEntity
+        instanceOf: Core:Class
+        icon: mui:Storage
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Spring:jpa.Entity
+            code: |
+              import {
+                Entity,
+                Field,
+                ManyToOne,
+                OneToMany
+              } from 'Spring/jpa'
+
+              /**
+               * EntityToJpaEntity — the JPA entity of an entity (rule 31), named after
+               * it, with UUID ids (Q6) and its attributes:
+               * - a Field per ordinary column of its table: `id` (the identifier of
+               *   the entity), each field of the entity and of its ancestors, `state`
+               *   when it has a lifecycle;
+               * - a ManyToOne per single-valued relation, fetched LAZY;
+               * - a OneToMany per multi-valued relation that has a return or is a
+               *   composition. A composition cascades ALL and removes its orphans.
+               *
+               * Left to the stack pattern, which knows the table and every entity: the
+               * table, the column of each Field, the foreign key and target of each
+               * ManyToOne, the `mappedBy` of each OneToMany, the ManyToOne of a
+               * composition child towards its parent and the audit Fields.
+               */
+              export default function (source) {
+                const names = [
+                  ...(this.canProduce(source, 'id') ? ['id'] : []),
+                  ...this.fieldsOf(source).map((field: any) => field.name),
+                  ...(source.lifecycle && this.canProduce(source, 'state') ? ['state'] : [])
+                ]
+                const fields = names.map((name: string) => new Field({ name }))
+
+                const manyToOnes = this.referenceRelationsOf(source)
+                  .filter((relation: any) => !relation.multiple)
+                  .filter((relation: any) => this.canProduce(source, this.referenceFieldName(relation)))
+                  .map((relation: any) => new ManyToOne({ name: relation.name, fetch: 'LAZY' }))
+
+                const oneToManys = this.relationsOf(source)
+                  .filter((relation: any) => relation.multiple && (relation.composite || this.hasReturn(relation, source)))
+                  .map((relation: any) => new OneToMany({
+                    name: relation.name,
+                    ...(relation.composite ? { cascade: ['ALL'], orphanRemoval: true } : {})
+                  }))
+
+                const id = fields.find((field: any) => field.name === 'id')
+                return new Entity({
+                  name: source.name,
+                  idGeneration: 'UUID',
+                  attributes: [...fields, ...manyToOnes, ...oneToManys],
+                  ...(id ? { id } : {})
+                })
+              }
+      - name: EntityToRepository
+        instanceOf: Core:Class
+        icon: mui:Inventory
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Spring:jpa.Repository
+            code: |
+              import { Repository } from 'Spring/jpa'
+
+              /**
+               * EntityToRepository — the repository of an entity (rule 32):
+               * `<Entity>Repository`.
+               *
+               * Left to the stack pattern: the JPA entity it manages.
+               */
+              export default function (source) {
+                return new Repository({ name: `${source.name}Repository` })
+              }
+      - name: EntityToService
+        instanceOf: Core:Class
+        icon: mui:Settings
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Spring:service.Service
+            code: |
+              import { Service } from 'Spring/service'
+
+              /**
+               * EntityToService — the service of an entity (rule 32):
+               * `<Entity>Service`, transactional.
+               *
+               * Left to the stack pattern: the repository it uses.
+               */
+              export default function (source) {
+                return new Service({ name: `${source.name}Service`, transactional: true })
+              }
+      - name: EntityToController
+        instanceOf: Core:Class
+        icon: mui:Api
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Spring:web.Controller
+            code: |
+              import { Controller } from 'Spring/web'
+
+              /**
+               * EntityToController — the controller of an entity (rule 32):
+               * `<Entity>Controller`.
+               *
+               * Left to the stack pattern: the resource it exposes, the endpoints it
+               * serves and the service it calls.
+               */
+              export default function (source) {
+                return new Controller({ name: `${source.name}Controller` })
+              }
+      - name: DomainToSpring
+        instanceOf: Core:Class
+        icon: thesvg:spring
+        extends:
+          - DomainToApplication:app.DomainToStack
+        properties:
+          - name: basePackage
+            instanceOf: Core:PrimitiveProperty
+            type: Core:String
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Core:Model
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              multiple: true
+              type: Core:Element
+            code: |
+              import { Context } from 'Spring/boot'
+              import { Entity, Field, ManyToOne } from 'Spring/jpa'
+              import {
+                entityToController,
+                entityToJpaEntity,
+                entityToRepository,
+                entityToService,
+                springApplication,
+                springAuditedApplication
+              } from 'DomainToSpringAngular/spring'
+
+              /**
+               * DomainToSpring — the stack pattern for Spring Boot (rules 4, 5 and 30
+               * to 33). Branched on a whole domain model, it produces three roots in
+               * the target of its Mapping, a model or a package (PLAT-1157):
+               * - the Application `<Name>` (StackApplication), named by
+               *   `applicationNameOf`: a SQL database and the API;
+               * - the package `spring` with the Spring context `<name>`, in lower case,
+               *   which realises it: a JPA entity per table, and per entity a
+               *   repository, a service and a controller;
+               * - the package `angular` with the Angular interface `web` of the
+               *   Application, which designates it without containing it (Q2).
+               *
+               * Options: `audit` (rule 18) and `basePackage`, `com.example.<model>`
+               * when empty (rule 5).
+               */
+              export default function (source) {
+                const stack: any = this.audit ? springAuditedApplication : springApplication
+                const application: any = map(source, stack)
+                const contextName = this.applicationNameOf(source).toLowerCase()
+                const at: Path = (...names) => ['spring', contextName, ...names].join('.')
+                const tables = new Map<string, any>(
+                  application.stores[0].records.map((table: any) => [table.name, table])
+                )
+                const resources = new Map<string, any>(
+                  application.apis[0].resources.map((resource: any) => [resource.name, resource])
+                )
+
+                const entities = this.entitiesOf(source)
+                const jpaEntities = new Map<any, any>(
+                  entities.map((entity: any) => [entity, map(entity, entityToJpaEntity)])
+                )
+                for (const entity of entities) {
+                  linkJpaEntity(this, entity, jpaEntities.get(entity), tables.get(entity.name), at)
+                }
+                addParentManyToOnes(this, entities, jpaEntities, tables, at)
+                if (this.audit) addAuditFields(this, [...jpaEntities.values()], tables)
+
+                // Per entity, a repository of its JPA entity, a service that uses it
+                // and a controller of its resource that calls the service (rule 32).
+                const repositories: any[] = []
+                const services: any[] = []
+                const controllers: any[] = []
+                for (const entity of entities) {
+                  const repository: any = map(entity, entityToRepository)
+                  repository.entity = jpaEntities.get(entity)
+                  const service: any = map(entity, entityToService)
+                  service.repositories = [repository]
+                  const controller: any = map(entity, entityToController)
+                  const resource = resources.get(entity.name)
+                  Object.assign(controller, { resource, endpoints: [...resource.endpoints], service })
+                  repositories.push(repository)
+                  services.push(service)
+                  controllers.push(controller)
+                }
+
+                const context = new Context({
+                  name: contextName,
+                  application,
+                  basePackage: this.basePackage || `com.example.${contextName}`,
+                  beans: [...repositories, ...services, ...controllers],
+                  entities: [...jpaEntities.values(), ...joinEntities(this, entities, tables, at)]
+                } as any)
+                return [
+                  application,
+                  { instanceOf: 'Core:Package', name: 'spring', into: 'elements', elements: [context] },
+                  { instanceOf: 'Core:Package', name: stack.frontendPackage, into: 'elements', elements: [...application.frontends] }
+                ]
+              }
+
+              /**
+               * A path in the target of the Mapping: `at('Client')` is
+               * `spring.boutique.Client`. Typed `any`: the spec
+               * types only know elements and specs.
+               */
+              type Path = (...names: string[]) => any
+
+              /**
+               * A JPA entity designates its table, and each attribute what realises
+               * it: a Field its column, a ManyToOne its foreign key and the entity
+               * the relation targets, a OneToMany the ManyToOne it is mapped by — on
+               * the other entity for a return, on the child for a composition.
+               */
+              function linkJpaEntity(
+                pattern: any,
+                entity: any,
+                jpaEntity: any,
+                table: any,
+                at: Path
+              ) {
+                jpaEntity.table = table
+                const relationNamed = (name: string) =>
+                  pattern.relationsOf(entity).find((relation: any) => relation.name === name)
+                for (const attribute of jpaEntity.attributes) {
+                  if (isA(attribute, 'Spring:jpa.Field')) {
+                    attribute.column = table.fields.find((column: any) => column.name === attribute.name)
+                  } else if (isA(attribute, 'Spring:jpa.ManyToOne')) {
+                    attribute.foreignKey = table.references.find((key: any) => key.name === attribute.name)
+                    attribute.target = at(relationNamed(attribute.name).type.name)
+                  } else if (isA(attribute, 'Spring:jpa.OneToMany')) {
+                    const relation = relationNamed(attribute.name)
+                    const other = relation.type
+                    const back = relation.composite
+                      ? pattern.referenceNameOf(entity)
+                      : other.relations.find((r: any) => !r.multiple && r.type === entity).name
+                    attribute.mappedBy = at(other.name, back)
+                  }
+                }
+              }
+
+              /**
+               * The child of a composition gets a ManyToOne towards its parent, on the
+               * foreign key the Application gave its table (rule 15): LigneDeCommande
+               * gets `commande`, which Commande.lignes is mapped by.
+               */
+              function addParentManyToOnes(
+                pattern: any,
+                entities: any[],
+                jpaEntities: Map<any,
+                any>,
+                tables: Map<string,
+                any>,
+                at: Path
+              ) {
+                for (const parent of entities) {
+                  for (const relation of pattern.relationsOf(parent)) {
+                    if (!relation.multiple || !relation.composite) continue
+                    const name = pattern.referenceNameOf(parent)
+                    const foreignKey = tables.get(relation.type.name).references
+                      .find((key: any) => key.name === name)
+                    if (!foreignKey) continue
+                    jpaEntities.get(relation.type).attributes.push(
+                      new ManyToOne({ name, foreignKey, target: at(parent.name), fetch: 'LAZY' })
+                    )
+                  }
+                }
+              }
+
+              /** A Field per audit column of the table (rule 18). */
+              function addAuditFields(
+                pattern: any,
+                jpaEntities: any[],
+                tables: Map<string,
+                any>
+              ) {
+                for (const jpaEntity of jpaEntities) {
+                  const table = tables.get(jpaEntity.name)
+                  for (const name of pattern.auditFields()) {
+                    const column = table.fields.find((c: any) => c.name === name)
+                    if (column) jpaEntity.attributes.push(new Field({ name, column }))
+                  }
+                }
+              }
+
+              /**
+               * The JPA entity of each join table (rule 33): named after the table,
+               * identified by its `id`, with a ManyToOne per foreign key. No
+               * repository and no controller.
+               */
+              function joinEntities(
+                pattern: any,
+                entities: any[],
+                tables: Map<string,
+                any>,
+                at: Path
+              ) {
+                return entities.flatMap((entity: any) =>
+                  pattern.referenceRelationsOf(entity)
+                    .filter((relation: any) => relation.multiple)
+                    .map((relation: any) => {
+                      const table = tables.get(`${entity.name}_${relation.name}`)
+                      const [ownerKey, otherKey] = table.references
+                      const id = new Field({ name: 'id', column: table.key })
+                      return new Entity({
+                        name: table.name,
+                        table,
+                        idGeneration: 'UUID',
+                        id,
+                        attributes: [
+                          id,
+                          new ManyToOne({ name: ownerKey.name, foreignKey: ownerKey, target: at(entity.name), fetch: 'LAZY' }),
+                          new ManyToOne({ name: otherKey.name, foreignKey: otherKey, target: at(relation.type.name), fetch: 'LAZY' })
+                        ]
+                      })
+                    })
+                )
+              }
+
+              /** Whether a spec is of the class at `path`. */
+              function isA(spec: any, path: string): boolean {
+                return spec.instanceOf === path
+              }
+      - name: entityToJpaEntity
+        instanceOf: DomainToSpringAngular:spring.EntityToJpaEntity
+        source: Domain:Entity
+        target: Spring:boot.Context
+        outputRelation: Spring:boot.Context.entities
+      - name: entityToRepository
+        instanceOf: DomainToSpringAngular:spring.EntityToRepository
+        source: Domain:Entity
+        target: Spring:boot.Context
+        outputRelation: Spring:boot.Context.beans
+      - name: entityToService
+        instanceOf: DomainToSpringAngular:spring.EntityToService
+        source: Domain:Entity
+        target: Spring:boot.Context
+        outputRelation: Spring:boot.Context.beans
+      - name: entityToController
+        instanceOf: DomainToSpringAngular:spring.EntityToController
+        source: Domain:Entity
+        target: Spring:boot.Context
+        outputRelation: Spring:boot.Context.beans
+      - name: domainToSpring
+        instanceOf: DomainToSpringAngular:spring.DomainToSpring
+        source: Core:Model
+        target: Core:Container
+      - name: springApplication
+        instanceOf: DomainToApplication:app.StackApplication
+        source: Core:Model
+        target: Core:Model
+        database: Application:sql.Database
+        record: DomainToSpringAngular:sql.entityToTable
+        joinTables: DomainToSpringAngular:sql.entityToJoinTables
+        frontend: Angular:Frontend
+        service: DomainToSpringAngular:angular.entityToService
+        frontendPackage: angular
+      - name: springAuditedApplication
+        instanceOf: DomainToApplication:app.StackApplication
+        source: Core:Model
+        target: Core:Model
+        audit: true
+        database: Application:sql.Database
+        record: DomainToSpringAngular:sql.entityToTable
+        joinTables: DomainToSpringAngular:sql.entityToJoinTables
+        frontend: Angular:Frontend
+        service: DomainToSpringAngular:angular.entityToService
+        frontendPackage: angular
+  - name: angular
+    instanceOf: Core:Package
+    elements:
+      - name: EntityToService
+        instanceOf: Core:Class
+        icon: mui:CloudSync
+        extends:
+          - DomainToApplication:app.DomainPattern
+        properties:
+          - name: map
+            instanceOf: Core:FunctionProperty
+            mandatory: true
+            input:
+              - name: source
+                instanceOf: Core:InputFeature
+                mandatory: true
+                type: Domain:Entity
+            output:
+              name: output
+              instanceOf: Core:OutputFeature
+              mandatory: true
+              type: Angular:Service
+            code: |
+              import { Service } from 'Angular'
+
+              /**
+               * EntityToService — the Angular service of the resource of an entity
+               * (rule 29): `<Entity>Api`.
+               *
+               * Left to the stack pattern, which knows the resource: the resource and the
+               * endpoints it serves.
+               */
+              export default function (source) {
+                return new Service({ name: `${source.name}Api` })
+              }
+      - name: entityToService
+        instanceOf: DomainToSpringAngular:angular.EntityToService
+        source: Domain:Entity
+        target: Angular:Frontend
+        outputRelation: Application:spa.Frontend.services
+  - name: PatternsClassDiagram
+    instanceOf: Diagram:core.Diagram
+    type: Uml:ClassDiagram
+    subject: DomainToSpringAngular
+    nodes:
+      - name: AppDomainPattern
+        instanceOf: Diagram:core.Node
+        element: DomainToApplication:app.DomainPattern
+        x: 0
+        'y': -420
+        width: 200
+        height: 264
+      - name: AppDomainToStack
+        instanceOf: Diagram:core.Node
+        element: DomainToApplication:app.DomainToStack
+        x: -290
+        'y': -240
+        width: 200
+        height: 72
+      - name: SpringDomainToSpring
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:spring.DomainToSpring
+        x: -290
+        'y': -60
+        width: 200
+        height: 72
+      - name: AngularEntityToService
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:angular.EntityToService
+        x: 0
+        'y': -240
+        width: 200
+        height: 56
+      - name: SqlEntityToTable
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:sql.EntityToTable
+        x: 250
+        'y': -240
+        width: 200
+        height: 56
+      - name: SqlFieldToColumn
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:sql.FieldToColumn
+        x: 250
+        'y': -140
+        width: 200
+        height: 56
+      - name: SqlRelationToForeignKey
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:sql.RelationToForeignKey
+        x: 250
+        'y': -40
+        width: 200
+        height: 56
+      - name: SqlEntityToJoinTables
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:sql.EntityToJoinTables
+        x: 250
+        'y': 60
+        width: 200
+        height: 56
+      - name: SpringEntityToJpaEntity
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:spring.EntityToJpaEntity
+        x: 500
+        'y': -240
+        width: 200
+        height: 56
+      - name: SpringEntityToRepository
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:spring.EntityToRepository
+        x: 500
+        'y': -140
+        width: 200
+        height: 56
+      - name: SpringEntityToService
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:spring.EntityToService
+        x: 500
+        'y': -40
+        width: 200
+        height: 56
+      - name: SpringEntityToController
+        instanceOf: Diagram:core.Node
+        element: DomainToSpringAngular:spring.EntityToController
+        x: 500
+        'y': 60
+        width: 200
+        height: 56
+version: latest
+depends:
+  - Mapping
+  - Diagram
+  - Uml
+  - metaltura/domain/Domain@v1.0.0
+  - metaltura/application/Application@v1.0.0
+  - metaltura/application/DomainToApplication@v1.0.0
+  - metaltura/spring/Spring@v1.0.0
+  - metaltura/angular/Angular@v1.0.0
