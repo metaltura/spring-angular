@@ -3862,7 +3862,7 @@ depends:
   - FileSystem
   - Diagram
   - Uml
-  - metaltura/application/Application@v1.0.0
-  - metaltura/application/ApplicationToCode@v1.0.0
-  - metaltura/spring/Spring@v1.0.0
-  - metaltura/angular/Angular@v1.0.0
+  - metaltura/application/Application@v2.0.0
+  - metaltura/application/ApplicationToCode@v2.0.0
+  - metaltura/spring/Spring@v2.0.0
+  - metaltura/angular/Angular@v2.0.0

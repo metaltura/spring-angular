@@ -18,10 +18,10 @@ La pile Spring Boot + Angular : les patrons qui écrivent, depuis un modèle de 
 
 | Dépôt | Ce qu'il en emploie | Ligne `depends` |
 | --- | --- | --- |
-| `metaltura/domain` | `Domain`, que lit `DomainToSpringAngular` | `metaltura/domain/Domain@v1.0.0` |
-| `metaltura/application` | `Application`, `DomainToApplication` et `ApplicationToCode` | `metaltura/application/Application@v1.0.0`<br>`metaltura/application/DomainToApplication@v1.0.0`<br>`metaltura/application/ApplicationToCode@v1.0.0` |
-| `metaltura/spring` | `Spring` | `metaltura/spring/Spring@v1.0.0` |
-| `metaltura/angular` | `Angular` | `metaltura/angular/Angular@v1.0.0` |
+| `metaltura/domain` | `Domain`, que lit `DomainToSpringAngular` | `metaltura/domain/Domain@v2.0.0` |
+| `metaltura/application` | `Application`, `DomainToApplication` et `ApplicationToCode` | `metaltura/application/Application@v2.0.0`<br>`metaltura/application/DomainToApplication@v2.0.0`<br>`metaltura/application/ApplicationToCode@v2.0.0` |
+| `metaltura/spring` | `Spring` | `metaltura/spring/Spring@v2.0.0` |
+| `metaltura/angular` | `Angular` | `metaltura/angular/Angular@v2.0.0` |
 
 Ces modèles système de Metaltura s'écrivent par leur nom seul :
 
@@ -36,12 +36,12 @@ Un modèle qui branche la pile sur son domaine écrit dans sa liste `depends` le
 
 ```yaml
 depends:
-  - metaltura/application/Application@v1.0.0
-  - metaltura/spring/Spring@v1.0.0
-  - metaltura/angular/Angular@v1.0.0
-  - metaltura/application/DomainToApplication@v1.0.0
-  - metaltura/spring-angular/DomainToSpringAngular@v1.0.0
-  - metaltura/spring-angular/SpringAngularToCode@v1.0.0
+  - metaltura/application/Application@v2.0.0
+  - metaltura/spring/Spring@v2.0.0
+  - metaltura/angular/Angular@v2.0.0
+  - metaltura/application/DomainToApplication@v2.0.0
+  - metaltura/spring-angular/DomainToSpringAngular@v2.0.0
+  - metaltura/spring-angular/SpringAngularToCode@v2.0.0
 ```
 
 C'est la liste de `BoutiqueSpringAngular` dans `metaltura/examples`. Elle nomme en plus, par leur nom seul :
@@ -50,7 +50,7 @@ C'est la liste de `BoutiqueSpringAngular` dans `metaltura/examples`. Elle nomme 
 - son domaine, `BoutiqueDomain` ;
 - `FileSystem`.
 
-Metaltura clone chaque dépôt nommé à l'étiquette `v1.0.0`. Toute la librairie est à `v1.0.0` : Metaltura refuse qu'un même dépôt soit demandé à deux versions.
+Metaltura clone chaque dépôt nommé à l'étiquette `v2.0.0`. Toute la librairie est à `v2.0.0` : Metaltura refuse qu'un même dépôt soit demandé à deux versions.
 
 ## D'où il vient
 

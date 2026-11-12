@@ -820,8 +820,8 @@ depends:
   - Mapping
   - Diagram
   - Uml
-  - metaltura/domain/Domain@v1.0.0
-  - metaltura/application/Application@v1.0.0
-  - metaltura/application/DomainToApplication@v1.0.0
-  - metaltura/spring/Spring@v1.0.0
-  - metaltura/angular/Angular@v1.0.0
+  - metaltura/domain/Domain@v2.0.0
+  - metaltura/application/Application@v2.0.0
+  - metaltura/application/DomainToApplication@v2.0.0
+  - metaltura/spring/Spring@v2.0.0
+  - metaltura/angular/Angular@v2.0.0
