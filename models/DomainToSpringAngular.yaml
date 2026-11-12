@@ -17,7 +17,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -92,7 +92,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Field
+                type: Domain:entities.Field
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -137,7 +137,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:EntityRelation
+                type: Domain:entities.EntityRelation
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -182,7 +182,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -231,21 +231,21 @@ elements:
               }
       - name: entityToTable
         instanceOf: DomainToSpringAngular:sql.EntityToTable
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Application:sql.Database
         outputRelation: Application:data.Store.records
       - name: fieldToColumn
         instanceOf: DomainToSpringAngular:sql.FieldToColumn
-        source: Domain:Field
+        source: Domain:entities.Field
         target: Application:sql.Table
         outputRelation: Application:data.Record.fields
       - name: relationToForeignKey
         instanceOf: DomainToSpringAngular:sql.RelationToForeignKey
-        source: Domain:EntityRelation
+        source: Domain:entities.EntityRelation
         target: Application:sql.Table
       - name: entityToJoinTables
         instanceOf: DomainToSpringAngular:sql.EntityToJoinTables
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Application:sql.Database
         outputRelation: Application:data.Store.records
   - name: spring
@@ -264,7 +264,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -334,7 +334,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -365,7 +365,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -396,7 +396,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -643,22 +643,22 @@ elements:
               }
       - name: entityToJpaEntity
         instanceOf: DomainToSpringAngular:spring.EntityToJpaEntity
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Spring:boot.Context
         outputRelation: Spring:boot.Context.entities
       - name: entityToRepository
         instanceOf: DomainToSpringAngular:spring.EntityToRepository
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Spring:boot.Context
         outputRelation: Spring:boot.Context.beans
       - name: entityToService
         instanceOf: DomainToSpringAngular:spring.EntityToService
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Spring:boot.Context
         outputRelation: Spring:boot.Context.beans
       - name: entityToController
         instanceOf: DomainToSpringAngular:spring.EntityToController
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Spring:boot.Context
         outputRelation: Spring:boot.Context.beans
       - name: domainToSpring
@@ -702,7 +702,7 @@ elements:
               - name: source
                 instanceOf: Core:InputFeature
                 mandatory: true
-                type: Domain:Entity
+                type: Domain:entities.Entity
             output:
               name: output
               instanceOf: Core:OutputFeature
@@ -723,7 +723,7 @@ elements:
               }
       - name: entityToService
         instanceOf: DomainToSpringAngular:angular.EntityToService
-        source: Domain:Entity
+        source: Domain:entities.Entity
         target: Angular:Frontend
         outputRelation: Application:spa.Frontend.services
   - name: PatternsClassDiagram
